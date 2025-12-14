@@ -884,13 +884,33 @@ def gantt_image():
         image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         plt.close()
         
+        # Calculate weekly production
+        weekly_production = []
+        for w in range(1, total_weeks + 1):
+            week_start = (w - 1) * 168
+            week_end = w * 168
+            wb_produced = 0
+            bb_produced = 0
+            for b in batches:
+                if b.cut_end is not None and week_start <= b.cut_end < week_end:
+                    if b.product == 'WB':
+                        wb_produced += sim.WB_PER_BATCH
+                    else:
+                        bb_produced += sim.BB_PER_BATCH
+            weekly_production.append({
+                'week': w,
+                'wb': wb_produced,
+                'bb': bb_produced
+            })
+        
         return jsonify({
             'success': True,
             'image': image_base64,
             'week': week,
             'total_weeks': total_weeks,
             'chart_type': chart_type,
-            'result': result
+            'result': result,
+            'weekly_production': weekly_production
         })
         
     except Exception as e:
