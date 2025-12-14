@@ -598,6 +598,302 @@ def health():
     return jsonify({'status': 'healthy'})
 
 
+@app.route('/gantt-image', methods=['POST'])
+def gantt_image():
+    """Generate Gantt chart image and return as base64"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import base64
+    from io import BytesIO
+    
+    config = request.json or {}
+    week = config.get('week', 1)
+    chart_type = config.get('chart_type', 'resources')  # 'resources' or 'workers'
+    
+    try:
+        sim = ProductionSimulator(config, collect_gantt_data=True)
+        result = sim.simulate()
+        batches = sim.all_batches
+        
+        # Calculate hours for this week
+        start_hour = (week - 1) * 168
+        end_hour = week * 168
+        total_weeks = sim.NUM_WEEKS
+        
+        # Filter relevant batches
+        relevant_batches = [b for b in batches if b.form_start < end_hour and 
+                          (b.cut_end is None or b.cut_end > start_hour or b.cure_end > start_hour)]
+        
+        if not relevant_batches:
+            return jsonify({'success': False, 'error': f'No batches in week {week}'})
+        
+        # Determine configuration
+        has_team2 = sim.TEAM_CONFIG != '1team'
+        has_oven2 = sim.NUM_OVEN_SETS == 2
+        
+        # Colors
+        colors = {
+            'form_wb': '#87CEEB',
+            'form_bb': '#4169E1',
+            'cook_wb': '#FFA500',
+            'cook_bb': '#FF8C00',
+            'cure_wb': '#90EE90',
+            'cut_wb': '#32CD32',
+            'cut_bb': '#228B22',
+        }
+        
+        if chart_type == 'resources':
+            # Build row configuration
+            rows = []
+            if has_team2:
+                rows.append(('Form (Team 1)', 'form', 1))
+                rows.append(('Form (Team 2)', 'form', 2))
+            else:
+                rows.append(('Form', 'form', None))
+            
+            if has_oven2:
+                rows.append(('Cook (Oven Set 1)', 'cook', 1))
+                rows.append(('Cook (Oven Set 2)', 'cook', 2))
+            else:
+                rows.append(('Cook', 'cook', None))
+            
+            rows.append(('Cure (stacked)', 'cure', None))
+            
+            if has_team2:
+                rows.append(('Cut (Team 1)', 'cut', 1))
+                rows.append(('Cut (Team 2)', 'cut', 2))
+            else:
+                rows.append(('Cut', 'cut', None))
+            
+            fig, ax = plt.subplots(figsize=(20, len(rows) * 0.8 + 2))
+            
+            y_labels = [r[0] for r in rows]
+            y_positions = list(range(len(rows) - 1, -1, -1))
+            
+            for b in relevant_batches:
+                product = b.product
+                
+                # Form
+                if b.form_start is not None and b.form_start < end_hour and b.form_end > start_hour:
+                    form_team = b.formed_by or 1
+                    for i, (label, stage, team_filter) in enumerate(rows):
+                        if stage == 'form':
+                            if team_filter is None or team_filter == form_team:
+                                y = y_positions[i]
+                                color = colors['form_wb'] if product == 'WB' else colors['form_bb']
+                                s = max(b.form_start, start_hour)
+                                e = min(b.form_end, end_hour)
+                                ax.barh(y, e - s, left=s, height=0.6, color=color, edgecolor='black', linewidth=0.5)
+                                if e - s > 3:
+                                    ax.text((s + e) / 2, y, f'{product}{b.id}', ha='center', va='center', fontsize=7)
+                
+                # Cook
+                if b.cook_start is not None and b.cook_start < end_hour and b.cook_end > start_hour:
+                    oven_set = getattr(b, 'oven_set', 1)
+                    for i, (label, stage, team_filter) in enumerate(rows):
+                        if stage == 'cook':
+                            if team_filter is None or team_filter == oven_set:
+                                y = y_positions[i]
+                                color = colors['cook_wb'] if product == 'WB' else colors['cook_bb']
+                                s = max(b.cook_start, start_hour)
+                                e = min(b.cook_end, end_hour)
+                                ax.barh(y, e - s, left=s, height=0.6, color=color, edgecolor='black', linewidth=0.5)
+                                ax.text((s + e) / 2, y, f'{product}{b.id}', ha='center', va='center', fontsize=7)
+                
+                # Cure (WB only)
+                if product == 'WB' and b.cure_start is not None and b.cure_end is not None:
+                    if b.cure_start < end_hour and b.cure_end > start_hour:
+                        for i, (label, stage, team_filter) in enumerate(rows):
+                            if stage == 'cure':
+                                y = y_positions[i]
+                                s = max(b.cure_start, start_hour)
+                                e = min(b.cure_end, end_hour)
+                                offset = (b.id % 3) * 0.25 - 0.25
+                                ax.barh(y + offset, e - s, left=s, height=0.25, color=colors['cure_wb'], 
+                                       edgecolor='black', linewidth=0.5, alpha=0.7 + (b.id % 3) * 0.1)
+                                if e - s > 5:
+                                    ax.text((s + e) / 2, y + offset, f'{product}{b.id}', ha='center', va='center', fontsize=6)
+                
+                # Cut
+                if b.cut_sessions:
+                    for i, (label, stage, team_filter) in enumerate(rows):
+                        if stage == 'cut':
+                            y = y_positions[i]
+                            
+                            # Merge sessions
+                            merged = []
+                            for sess in b.cut_sessions:
+                                session_start, session_end, team_num = sess
+                                if team_filter is not None and team_num != team_filter:
+                                    continue
+                                if session_start >= end_hour or session_end <= start_hour:
+                                    continue
+                                if merged and abs(merged[-1][1] - session_start) < 0.1 and merged[-1][2] == team_num:
+                                    merged[-1] = (merged[-1][0], session_end, team_num)
+                                else:
+                                    merged.append((session_start, session_end, team_num))
+                            
+                            if not merged:
+                                continue
+                            
+                            is_paused = len(merged) > 1
+                            color = colors['cut_wb'] if product == 'WB' else colors['cut_bb']
+                            
+                            for sess in merged:
+                                s = max(sess[0], start_hour)
+                                e = min(sess[1], end_hour)
+                                if is_paused:
+                                    ax.barh(y, e - s, left=s, height=0.6, color=color, edgecolor='black', 
+                                           linewidth=0.5, hatch='///', alpha=0.8)
+                                else:
+                                    ax.barh(y, e - s, left=s, height=0.6, color=color, edgecolor='black', linewidth=0.5)
+                                
+                                bar_width = e - s
+                                fontsize = 8 if bar_width > 5 else (6 if bar_width > 2 else 5)
+                                ax.text((s + e) / 2, y, f'{product}{b.id}', ha='center', va='center', 
+                                       fontsize=fontsize, color='white')
+            
+            ax.set_yticks(y_positions)
+            ax.set_yticklabels(y_labels)
+            ax.set_xlim(start_hour, end_hour)
+            ax.set_xlabel('Hours')
+            
+            # Day markers
+            for day in range(int(start_hour // 24), int(end_hour // 24) + 1):
+                day_hour = day * 24
+                if start_hour <= day_hour <= end_hour:
+                    color = 'red' if day % 7 == 0 else 'blue'
+                    style = '--' if day % 7 == 0 else ':'
+                    ax.axvline(x=day_hour, color=color, linestyle=style, alpha=0.5)
+            
+            title = f'Production Flow - Week {week} (Hours {start_hour}-{end_hour})'
+            title += f'\n{sim.TEAM_CONFIG}, {sim.config.get("num_ovens", 5)} ovens, Strategy: {sim.PRIORITY_STRATEGY}'
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            
+            # Legend
+            legend_elements = [
+                mpatches.Patch(color=colors['form_wb'], label='Form WB'),
+                mpatches.Patch(color=colors['form_bb'], label='Form BB'),
+                mpatches.Patch(color=colors['cook_wb'], label='Cook WB'),
+                mpatches.Patch(color=colors['cook_bb'], label='Cook BB'),
+                mpatches.Patch(color=colors['cure_wb'], label='Cure WB'),
+                mpatches.Patch(color=colors['cut_wb'], label='Cut WB'),
+                mpatches.Patch(color=colors['cut_bb'], label='Cut BB'),
+                mpatches.Patch(facecolor=colors['cut_wb'], hatch='///', label='Paused Cut'),
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+            ax.grid(axis='x', alpha=0.3)
+            
+        else:  # workers chart
+            if has_team2:
+                rows = [('Team 1', 1), ('Team 2', 2)]
+            else:
+                rows = [('Team 1', 1)]
+            
+            fig, ax = plt.subplots(figsize=(20, len(rows) * 1.5 + 2))
+            
+            y_labels = [r[0] for r in rows]
+            y_positions = list(range(len(rows) - 1, -1, -1))
+            
+            for b in relevant_batches:
+                product = b.product
+                
+                # Form
+                if b.form_start is not None and b.form_start < end_hour and b.form_end > start_hour:
+                    form_team = b.formed_by or 1
+                    for i, (label, team_num) in enumerate(rows):
+                        if team_num == form_team:
+                            y = y_positions[i]
+                            color = colors['form_wb'] if product == 'WB' else colors['form_bb']
+                            s = max(b.form_start, start_hour)
+                            e = min(b.form_end, end_hour)
+                            ax.barh(y + 0.2, e - s, left=s, height=0.35, color=color, edgecolor='black', linewidth=0.5)
+                            if e - s > 3:
+                                ax.text((s + e) / 2, y + 0.2, f'{product}{b.id}', ha='center', va='center', fontsize=6)
+                
+                # Cut
+                if b.cut_sessions:
+                    for i, (label, team_num) in enumerate(rows):
+                        y = y_positions[i]
+                        
+                        team_sessions = [(s, e, t) for s, e, t in b.cut_sessions if t == team_num]
+                        if not team_sessions:
+                            continue
+                        
+                        merged = []
+                        for sess in team_sessions:
+                            session_start, session_end, tn = sess
+                            if session_start >= end_hour or session_end <= start_hour:
+                                continue
+                            if merged and abs(merged[-1][1] - session_start) < 0.1:
+                                merged[-1] = (merged[-1][0], session_end, tn)
+                            else:
+                                merged.append((session_start, session_end, tn))
+                        
+                        if not merged:
+                            continue
+                        
+                        is_paused = len(merged) > 1
+                        color = colors['cut_wb'] if product == 'WB' else colors['cut_bb']
+                        
+                        for sess in merged:
+                            s = max(sess[0], start_hour)
+                            e = min(sess[1], end_hour)
+                            if is_paused:
+                                ax.barh(y - 0.2, e - s, left=s, height=0.35, color=color, edgecolor='black',
+                                       linewidth=0.5, hatch='///', alpha=0.8)
+                            else:
+                                ax.barh(y - 0.2, e - s, left=s, height=0.35, color=color, edgecolor='black', linewidth=0.5)
+                            
+                            bar_width = e - s
+                            fontsize = 7 if bar_width > 5 else 5
+                            ax.text((s + e) / 2, y - 0.2, f'{product}{b.id}', ha='center', va='center',
+                                   fontsize=fontsize, color='white')
+            
+            ax.set_yticks(y_positions)
+            ax.set_yticklabels(y_labels)
+            ax.set_xlim(start_hour, end_hour)
+            ax.set_xlabel('Hours')
+            
+            title = f'Worker Activity - Week {week} (Hours {start_hour}-{end_hour})'
+            title += f'\n{sim.TEAM_CONFIG}, Strategy: {sim.PRIORITY_STRATEGY}'
+            ax.set_title(title, fontsize=12, fontweight='bold')
+            
+            legend_elements = [
+                mpatches.Patch(color=colors['form_wb'], label='Form WB'),
+                mpatches.Patch(color=colors['form_bb'], label='Form BB'),
+                mpatches.Patch(color=colors['cut_wb'], label='Cut WB'),
+                mpatches.Patch(color=colors['cut_bb'], label='Cut BB'),
+                mpatches.Patch(facecolor=colors['cut_wb'], hatch='///', label='Paused Cut'),
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+            ax.grid(axis='x', alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=120, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        plt.close()
+        
+        return jsonify({
+            'success': True,
+            'image': image_base64,
+            'week': week,
+            'total_weeks': total_weeks,
+            'chart_type': chart_type,
+            'result': result
+        })
+        
+    except Exception as e:
+        import traceback
+        return jsonify({'success': False, 'error': str(e), 'trace': traceback.format_exc()}), 400
+
+
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
