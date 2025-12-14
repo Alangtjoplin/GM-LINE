@@ -611,8 +611,12 @@ def gantt_image():
     config = request.json or {}
     week = config.get('week', 1)
     chart_type = config.get('chart_type', 'resources')  # 'resources' or 'workers'
+    seed = config.get('seed', 42)  # Use consistent seed for reproducible results
     
     try:
+        # Set random seed for consistent results across weeks
+        random.seed(seed)
+        
         sim = ProductionSimulator(config, collect_gantt_data=True)
         result = sim.simulate()
         batches = sim.all_batches
