@@ -358,9 +358,11 @@ class ProductionSimulator:
             ready = []
             for b in batches:
                 if b.cure_end <= time and b.cut_end is None and b.id not in exclude:
-                    # If it's a NEW BB and there's already a BB in progress, skip it
-                    if b.product == 'BB' and b.cut_progress == 0 and bb_in_progress is not None:
-                        continue
+                    # If ANY BB is being cut or in progress, skip ALL other BBs
+                    if b.product == 'BB' and bb_in_progress is not None:
+                        # Only allow this BB if it's THE one in progress
+                        if bb_in_progress != b:
+                            continue
                     ready.append(b)
             
             def sort_key(b):
