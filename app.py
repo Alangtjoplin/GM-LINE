@@ -193,38 +193,38 @@ class ProductionSimulator:
         oven1_free = 0.0
         oven2_free = 0.0
         
+        # Form area is SHARED - only one team can use it at a time
+        form_area_free = 0.0
+        
         # Daily cleaning tracking - track actual time of last clean
-        last_form_clean_time_team1 = -24.0  # Start needing clean
-        last_form_clean_time_team2 = -24.0
+        # Form area is shared, so only ONE cleaning time for both teams
+        last_form_clean_time = -24.0  # Start needing clean
         last_oven_clean_time = -24.0
         
         # Cleaning events for Gantt chart
         cleaning_events = []
         
-        def hours_since_form_clean(team_num, t):
-            if team_num == 1:
-                return t - last_form_clean_time_team1
-            else:
-                return t - last_form_clean_time_team2
+        def hours_since_form_clean(t):
+            return t - last_form_clean_time
         
         def hours_since_oven_clean(t):
             return t - last_oven_clean_time
         
-        def needs_form_clean(team_num, t):
+        def needs_form_clean(t):
             if not self.CLEANING_ENABLED:
                 return False
-            return hours_since_form_clean(team_num, t) >= 24.0
+            return hours_since_form_clean(t) >= 24.0
         
         def needs_oven_clean(t):
             if not self.CLEANING_ENABLED:
                 return False
             return hours_since_oven_clean(t) >= 24.0
         
-        def must_clean_form_urgently(team_num, t):
+        def must_clean_form_urgently(t):
             """Returns True if it's been 22+ hours - getting urgent"""
             if not self.CLEANING_ENABLED:
                 return False
-            return hours_since_form_clean(team_num, t) >= 22.0
+            return hours_since_form_clean(t) >= 22.0
         
         def must_clean_oven_urgently(t):
             """Returns True if it's been 22+ hours - getting urgent"""
@@ -233,12 +233,10 @@ class ProductionSimulator:
             return hours_since_oven_clean(t) >= 22.0
         
         def do_form_clean(team_num, t):
-            nonlocal last_form_clean_time_team1, last_form_clean_time_team2
+            nonlocal last_form_clean_time, form_area_free
             clean_end = t + self.FORM_CLEAN_TIME
-            if team_num == 1:
-                last_form_clean_time_team1 = t
-            else:
-                last_form_clean_time_team2 = t
+            last_form_clean_time = t
+            form_area_free = clean_end  # Form area blocked during cleaning
             if self.collect_gantt_data:
                 cleaning_events.append({
                     'type': 'form_clean',
@@ -302,11 +300,29 @@ class ProductionSimulator:
             return len([b for b in batches if b.product == 'WB' 
                        and b.cure_end > time and b.cut_end is None])
         
+        def bb_cutting_machine_busy():
+            """Check if BB cutting machine is in use (including paused BB cuts)
+            Returns the batch if there's a paused BB, or True if actively cutting, or False if free"""
+            for b in batches:
+                if b.product == 'BB' and b.cut_progress > 0 and b.cut_end is None:
+                    # BB has started cutting but not finished
+                    return b  # Return the batch so we can prioritize it
+            return None
+        
         def ready_to_cut(exclude, team_num=None):
-            ready = [b for b in batches 
-                    if b.cure_end <= time and b.cut_end is None 
-                    and b.id not in exclude]
+            bb_in_progress = bb_cutting_machine_busy()
+            ready = []
+            for b in batches:
+                if b.cure_end <= time and b.cut_end is None and b.id not in exclude:
+                    # If it's a NEW BB and there's already a BB in progress, skip it
+                    if b.product == 'BB' and b.cut_progress == 0 and bb_in_progress is not None:
+                        continue
+                    ready.append(b)
+            
             def sort_key(b):
+                # Highest priority: BB that's already in progress (machine is busy with it)
+                if b.product == 'BB' and b.cut_progress > 0:
+                    return (-1, b.cure_end)  # Highest priority
                 if b.cut_progress > 0:
                     if b.cut_by == team_num:
                         return (0, b.cure_end)
@@ -362,13 +378,16 @@ class ProductionSimulator:
             return True
         
         def form(product, oven_num, team_num):
-            nonlocal batch_id, oven1_free, oven2_free, wb_batches_formed, bb_batches_formed
+            nonlocal batch_id, oven1_free, oven2_free, wb_batches_formed, bb_batches_formed, form_area_free
             b = Batch(batch_id, product)
             batch_id += 1
             
             b.form_start = time
             b.form_end = time + self.FORM_TIME
             b.formed_by = team_num
+            
+            # Form area is blocked until forming is done
+            form_area_free = b.form_end
             
             # Randomly select cook time from available options based on weights
             cook_time = self._get_weighted_cook_time(product)
@@ -433,7 +452,8 @@ class ProductionSimulator:
             
             team_num = 2 if is_team2 else 1
             wb_priority = get_priority()
-            can_form = time >= deadline
+            # Can only form if: deadline passed AND form area is free
+            can_form = time >= deadline and form_area_free <= time
             if shift_end != float('inf'):
                 can_form = can_form and (shift_end - time) >= self.FORM_TIME
             
@@ -527,15 +547,16 @@ class ProductionSimulator:
                             being_cut.add(b.id)
             
             # Check cleaning needs (time-based: 24+ hours since last clean)
-            form_clean_needed_t1 = needs_form_clean(1, time)
+            # Form area is SHARED - only one cleaning needed for both teams
+            form_clean_needed = needs_form_clean(time)
             oven_clean_needed = needs_oven_clean(time)
-            form_clean_urgent_t1 = must_clean_form_urgently(1, time)
+            form_clean_urgent = must_clean_form_urgently(time)
             oven_clean_urgent = must_clean_oven_urgently(time)
             
             # TEAM 1 WORK
             if team1_free <= time:
-                # PRIORITY 1: Form cleaning if 24+ hours since last clean
-                if form_clean_needed_t1:
+                # PRIORITY 1: Form cleaning if 24+ hours since last clean AND form area is free
+                if form_clean_needed and form_area_free <= time:
                     team1_free = do_form_clean(1, time)
                 # PRIORITY 2: Oven cleaning if 24+ hours AND oven is free
                 elif oven_clean_needed and oven1_free <= time:
@@ -547,7 +568,8 @@ class ProductionSimulator:
                 else:
                     # Check if there's work to do
                     ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
-                    can_form = (oven1_free <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                    # Can only form if form area is free AND oven will be ready
+                    can_form = (form_area_free <= time) and (oven1_free <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
                     
                     if ready or can_form:
                         # Do normal work
@@ -566,16 +588,17 @@ class ProductionSimulator:
                 if not team2_on(time):
                     team2_free = next_team2_start(time)
                 elif team2_free <= time:
-                    form_clean_needed_t2 = needs_form_clean(2, time)
-                    
-                    if form_clean_needed_t2:
-                        # 24+ hours since last clean - do it now
+                    # Form area is SHARED - Team 2 only cleans if Team 1 hasn't recently
+                    # AND form area is free (not being used or cleaned by Team 1)
+                    if form_clean_needed and form_area_free <= time:
+                        # 24+ hours since last clean and area is free - Team 2 can clean
                         team2_free = do_form_clean(2, time)
                     else:
                         # Check if there's work to do
                         ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
                         oven_for_team2 = oven2_free if self.NUM_OVEN_SETS == 2 else oven1_free
-                        can_form = (oven_for_team2 <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                        # Can only form if form area is free
+                        can_form = (form_area_free <= time) and (oven_for_team2 <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
                         
                         if ready or can_form:
                             # Do normal work
@@ -592,12 +615,12 @@ class ProductionSimulator:
                             else:
                                 team2_free = result
                         else:
-                            # No work available - use downtime for cleaning
-                            if form_clean_needed_t2:
+                            # No work available - Team 2 can clean form area if needed and free
+                            if form_clean_needed and form_area_free <= time:
                                 team2_free = do_form_clean(2, time)
                             # Team 2 doesn't do oven cleaning (Team 1 handles it)
             
-            events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME]
+            events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME, form_area_free]
             if self.NUM_OVEN_SETS == 2:
                 events.extend([oven2_free, oven2_free - self.FORM_TIME])
             if team2_enabled():
