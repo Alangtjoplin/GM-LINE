@@ -692,12 +692,16 @@ def simulate():
     config = request.json or {}
     
     try:
-        sim = ProductionSimulator(config)
+        sim = ProductionSimulator(config, collect_gantt_data=True)
         result = sim.simulate()
+        
+        # Analyze bottlenecks if targets not met
+        bottleneck = analyze_bottleneck(sim, result)
         
         return jsonify({
             'success': True,
             'result': result,
+            'bottleneck': bottleneck,
             'config': {
                 'wb_target': sim.WB_TARGET,
                 'bb_target': sim.BB_TARGET,
@@ -709,6 +713,179 @@ def simulate():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 400
+
+
+def analyze_bottleneck(sim, result):
+    """Analyze what's limiting production"""
+    wb_pct = result['wb_pct']
+    bb_pct = result['bb_pct']
+    
+    # If both targets met, no bottleneck
+    if wb_pct >= 100 and bb_pct >= 100:
+        return {
+            'status': 'targets_met',
+            'message': 'All production targets have been met!',
+            'suggestions': []
+        }
+    
+    batches = sim.all_batches
+    if not batches:
+        return {
+            'status': 'no_data',
+            'message': 'No batch data available for analysis.',
+            'suggestions': []
+        }
+    
+    # Calculate time utilization
+    total_hours = sim.TOTAL_HOURS
+    
+    # Form area utilization
+    form_time_used = sum(b.form_end - b.form_start for b in batches if b.form_end)
+    form_utilization = (form_time_used / total_hours) * 100
+    
+    # Oven utilization
+    oven_time_used = sum(b.cook_end - b.cook_start for b in batches if b.cook_end)
+    oven_utilization = (oven_time_used / total_hours) * 100
+    
+    # Cut time analysis
+    cut_time_used = sum(b.cut_end - b.cut_start for b in batches if b.cut_end and b.cut_start)
+    
+    # Count batches by type
+    wb_batches = len([b for b in batches if b.product == 'WB'])
+    bb_batches = len([b for b in batches if b.product == 'BB'])
+    
+    # Analyze cure time waiting (WB only)
+    wb_cure_wait = sum(b.cure_end - b.cure_start for b in batches if b.product == 'WB' and b.cure_end)
+    avg_wb_cure = wb_cure_wait / wb_batches if wb_batches > 0 else 0
+    
+    # Average cook times
+    avg_cook_time = sum(b.cook_end - b.cook_start for b in batches if b.cook_end) / len(batches) if batches else 0
+    
+    # Identify bottleneck
+    bottlenecks = []
+    suggestions = []
+    
+    # Check oven utilization
+    if oven_utilization > 90:
+        bottlenecks.append({
+            'type': 'oven',
+            'severity': 'high',
+            'message': f'Oven utilization is very high ({oven_utilization:.1f}%)',
+            'detail': 'The oven is running almost constantly, limiting how many batches can be produced.'
+        })
+        suggestions.append('Consider adding more ovens or reducing cook times')
+        suggestions.append('Check if cook time distribution can be optimized')
+    elif oven_utilization > 75:
+        bottlenecks.append({
+            'type': 'oven',
+            'severity': 'medium',
+            'message': f'Oven utilization is high ({oven_utilization:.1f}%)',
+            'detail': 'The oven is frequently busy.'
+        })
+    
+    # Check form area utilization
+    if form_utilization > 85:
+        bottlenecks.append({
+            'type': 'form_area',
+            'severity': 'high',
+            'message': f'Form area utilization is very high ({form_utilization:.1f}%)',
+            'detail': 'Workers are spending most of their time forming batches.'
+        })
+        suggestions.append('Consider adding a second team to help with forming')
+        suggestions.append('Check if form time can be reduced')
+    elif form_utilization < 40 and (wb_pct < 100 or bb_pct < 100):
+        bottlenecks.append({
+            'type': 'form_area',
+            'severity': 'info',
+            'message': f'Form area utilization is low ({form_utilization:.1f}%)',
+            'detail': 'Workers have idle time but targets not met - check sheet limits or cure backlog.'
+        })
+    
+    # Check sheet constraints
+    wb_needed = sim.WB_TARGET / sim.WB_PER_BATCH
+    bb_needed = sim.BB_TARGET / sim.BB_PER_BATCH
+    
+    if wb_batches < wb_needed * 0.95 and wb_pct < 100:
+        # Not making enough WB batches
+        if sim.WB_SHEETS <= 2:
+            bottlenecks.append({
+                'type': 'wb_sheets',
+                'severity': 'medium',
+                'message': f'WB sheet limit may be constraining production ({sim.WB_SHEETS} sheets)',
+                'detail': f'Only {wb_batches} WB batches made, needed ~{wb_needed:.0f} for target.'
+            })
+            suggestions.append(f'Try increasing WB sheets from {sim.WB_SHEETS} to {sim.WB_SHEETS + 1}')
+    
+    if bb_batches < bb_needed * 0.95 and bb_pct < 100:
+        if sim.BB_SHEETS <= 2:
+            bottlenecks.append({
+                'type': 'bb_sheets',
+                'severity': 'medium',
+                'message': f'BB sheet limit may be constraining production ({sim.BB_SHEETS} sheets)',
+                'detail': f'Only {bb_batches} BB batches made, needed ~{bb_needed:.0f} for target.'
+            })
+            suggestions.append(f'Try increasing BB sheets from {sim.BB_SHEETS} to {sim.BB_SHEETS + 1}')
+    
+    # Check WB cure time impact
+    if wb_pct < bb_pct and avg_wb_cure > 28:
+        bottlenecks.append({
+            'type': 'cure_time',
+            'severity': 'medium',
+            'message': f'WB cure time averaging {avg_wb_cure:.1f} hours',
+            'detail': 'Long cure times delay WB production. Consider adjusting cure time distribution.'
+        })
+        suggestions.append('Skew cure time distribution toward shorter times')
+    
+    # Check strategy alignment
+    if abs(wb_pct - bb_pct) > 20:
+        bottlenecks.append({
+            'type': 'strategy',
+            'severity': 'medium',
+            'message': f'Production imbalance: WB {wb_pct:.1f}% vs BB {bb_pct:.1f}%',
+            'detail': 'The current strategy may not be optimal for your targets.'
+        })
+        if wb_pct < bb_pct:
+            suggestions.append('Try WB-focused strategies: wb_first, cure_aware, or balanced_goal')
+        else:
+            suggestions.append('Try BB-focused strategies: bb_first or ratio_batches')
+    
+    # Check cleaning impact
+    cleaning_events = getattr(sim, 'cleaning_events', [])
+    if cleaning_events:
+        total_clean_time = sum(e['end'] - e['start'] for e in cleaning_events)
+        clean_pct = (total_clean_time / total_hours) * 100
+        if clean_pct > 5:
+            bottlenecks.append({
+                'type': 'cleaning',
+                'severity': 'low',
+                'message': f'Cleaning takes {clean_pct:.1f}% of total time',
+                'detail': f'{len(cleaning_events)} cleaning events totaling {total_clean_time:.1f} hours.'
+            })
+    
+    # Determine primary bottleneck
+    if bottlenecks:
+        high_severity = [b for b in bottlenecks if b['severity'] == 'high']
+        primary = high_severity[0] if high_severity else bottlenecks[0]
+        status = 'bottleneck_found'
+    else:
+        primary = None
+        status = 'analysis_complete'
+        suggestions.append('Try running with different strategies to find optimal configuration')
+    
+    return {
+        'status': status,
+        'primary': primary,
+        'all_bottlenecks': bottlenecks,
+        'suggestions': suggestions[:5],  # Limit to 5 suggestions
+        'stats': {
+            'form_utilization': round(form_utilization, 1),
+            'oven_utilization': round(oven_utilization, 1),
+            'wb_batches': wb_batches,
+            'bb_batches': bb_batches,
+            'avg_cook_time': round(avg_cook_time, 1),
+            'avg_wb_cure': round(avg_wb_cure, 1),
+        }
+    }
 
 
 @app.route('/test-strategies', methods=['POST'])
