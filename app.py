@@ -9,7 +9,8 @@ from flask_cors import CORS
 import random
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Flutter web frontend
+# Enable CORS for all origins (needed for Flutter web)
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 
 # =============================================================================
 # SIMULATION CODE
@@ -1105,7 +1106,11 @@ def gantt_data():
 @app.route('/health')
 def health():
     """Health check endpoint for Railway"""
-    return jsonify({'status': 'healthy'})
+    return jsonify({
+        'status': 'healthy',
+        'message': 'GM Line Production API is running',
+        'version': '1.0'
+    })
 
 
 @app.route('/gantt-image', methods=['POST'])
