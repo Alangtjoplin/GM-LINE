@@ -45,6 +45,7 @@ class ProductionSimulator:
         num_ovens = config.get('num_ovens', 5)
         scale = num_ovens / 5
         
+        # Times scale with number of ovens (more ovens = bigger batches = longer times)
         self.FORM_TIME = config.get('form_time', 6) * scale
         self.CUT_TIME = config.get('cut_time', 8) * scale
         self.WB_PER_BATCH = int(config.get('wb_per_batch', 3000) * scale)
@@ -396,6 +397,9 @@ class ProductionSimulator:
             
             # Randomly select cook time from available options based on weights
             cook_time = self._get_weighted_cook_time(product)
+            
+            # Batch goes straight into oven after forming
+            # (caller must ensure oven will be free by form_end)
             b.cook_start = b.form_end
             b.cook_end = b.cook_start + cook_time
             
@@ -592,27 +596,31 @@ class ProductionSimulator:
                 else:
                     # Check what we can do
                     ready = ready_to_cut(being_cut, 1)
-                    # Can form if form area is free and sheets available
-                    can_form = (form_area_free <= time) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
                     
-                    # Calculate when we'd need to start forming to have batch ready when oven is free
-                    oven_wait_after_form = max(0, oven1_free - (time + self.FORM_TIME))
+                    # Can form if:
+                    # 1. Form area is free
+                    # 2. Sheets available  
+                    # 3. Oven will be free by the time forming finishes
+                    sheets_available = (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                    oven_ready_after_form = oven1_free <= (time + self.FORM_TIME)
+                    can_form = (form_area_free <= time) and sheets_available and oven_ready_after_form
+                    
+                    # Time until we should start forming (so batch is ready when oven is free)
+                    time_to_start_forming = max(0, oven1_free - self.FORM_TIME - time)
                     
                     if can_form:
-                        # If oven is almost ready (within 2 hours after forming would finish), prioritize forming
-                        # Or if nothing to cut, form anyway
-                        if oven_wait_after_form <= 2.0 or not ready:
-                            # Form based on priority strategy
-                            wb_priority = get_priority()
-                            if wb_priority:
-                                if active_wb() < self.WB_SHEETS:
-                                    result = form('WB', 1, 1)
-                                    team1_free = result
-                                elif active_bb() < self.BB_SHEETS:
-                                    result = form('BB', 1, 1)
-                                    team1_free = result
-                                elif ready:
-                                    # All sheets in use, but can cut
+                        # Oven will be ready when forming finishes - form now!
+                        wb_priority = get_priority()
+                        if wb_priority:
+                            if active_wb() < self.WB_SHEETS:
+                                result = form('WB', 1, 1)
+                                team1_free = result
+                            elif active_bb() < self.BB_SHEETS:
+                                result = form('BB', 1, 1)
+                                team1_free = result
+                            else:
+                                # All sheets in use
+                                if ready:
                                     b = ready[0]
                                     being_cut.add(b.id)
                                     if b.cut_by is None:
@@ -621,76 +629,63 @@ class ProductionSimulator:
                                     cut(b, remaining, 1, is_partial=False)
                                     team1_free = time + remaining
                                 else:
-                                    team1_free = min(oven1_free, form_area_free + 0.1)
-                            else:
-                                if active_bb() < self.BB_SHEETS:
-                                    result = form('BB', 1, 1)
-                                    team1_free = result
-                                elif active_wb() < self.WB_SHEETS:
-                                    result = form('WB', 1, 1)
-                                    team1_free = result
-                                elif ready:
-                                    b = ready[0]
-                                    being_cut.add(b.id)
-                                    if b.cut_by is None:
-                                        b.cut_by = 1
-                                    remaining = self.CUT_TIME - b.cut_progress
-                                    cut(b, remaining, 1, is_partial=False)
-                                    team1_free = time + remaining
-                                else:
-                                    team1_free = min(oven1_free, form_area_free + 0.1)
-                        elif ready:
-                            # Oven not ready for a while, cut while waiting
-                            b = ready[0]
-                            being_cut.add(b.id)
-                            if b.cut_by is None:
-                                b.cut_by = 1
-                            remaining = self.CUT_TIME - b.cut_progress
-                            
-                            # But stop cutting in time to form
-                            time_to_start_forming = oven1_free - self.FORM_TIME - time
-                            if time_to_start_forming > 0 and time_to_start_forming < remaining:
-                                cut(b, time_to_start_forming, 1, is_partial=True)
-                                team1_free = time + time_to_start_forming
-                            else:
-                                cut(b, remaining, 1, is_partial=False)
-                                team1_free = time + remaining
+                                    next_events = [self.TOTAL_HOURS, form_area_free, oven1_free]
+                                    for b in batches:
+                                        if b.cure_end > time and b.cut_end is None:
+                                            next_events.append(b.cure_end)
+                                    team1_free = min(e for e in next_events if e > time)
                         else:
-                            # Nothing to cut, just wait for oven or cure to finish
-                            next_events = [self.TOTAL_HOURS, form_area_free, oven1_free]
-                            for b in batches:
-                                if b.cure_end > time and b.cut_end is None:
-                                    next_events.append(b.cure_end)
-                            team1_free = min(e for e in next_events if e > time)
-                    elif ready:
-                        # No forming available, Team 1 can cut
+                            if active_bb() < self.BB_SHEETS:
+                                result = form('BB', 1, 1)
+                                team1_free = result
+                            elif active_wb() < self.WB_SHEETS:
+                                result = form('WB', 1, 1)
+                                team1_free = result
+                            else:
+                                if ready:
+                                    b = ready[0]
+                                    being_cut.add(b.id)
+                                    if b.cut_by is None:
+                                        b.cut_by = 1
+                                    remaining = self.CUT_TIME - b.cut_progress
+                                    cut(b, remaining, 1, is_partial=False)
+                                    team1_free = time + remaining
+                                else:
+                                    next_events = [self.TOTAL_HOURS, form_area_free, oven1_free]
+                                    for b in batches:
+                                        if b.cure_end > time and b.cut_end is None:
+                                            next_events.append(b.cure_end)
+                                    team1_free = min(e for e in next_events if e > time)
+                    elif ready and time_to_start_forming > 0.5:
+                        # Oven not ready yet, cut while waiting
                         b = ready[0]
                         being_cut.add(b.id)
                         if b.cut_by is None:
                             b.cut_by = 1
                         remaining = self.CUT_TIME - b.cut_progress
                         
-                        # Check if we need to form soon
-                        deadline1 = oven1_free - self.FORM_TIME
-                        time_until_form = deadline1 - time if deadline1 > time else float('inf')
-                        
-                        if time_until_form < remaining and time_until_form > 0:
-                            # We'll need to stop for forming
-                            if time_until_form < 0.5 and b.cut_progress == 0:
-                                # Less than 30 min before forming and haven't started - just wait
-                                being_cut.discard(b.id)
-                                team1_free = deadline1
-                            else:
-                                # Cut until we need to form
-                                cut(b, time_until_form, 1, is_partial=True)
-                                team1_free = time + time_until_form
+                        # Stop cutting in time to form
+                        if time_to_start_forming < remaining:
+                            cut(b, time_to_start_forming, 1, is_partial=True)
+                            team1_free = time + time_to_start_forming
                         else:
-                            # Full cut
                             cut(b, remaining, 1, is_partial=False)
                             team1_free = time + remaining
+                    elif ready:
+                        # Can cut but forming time is soon - just cut normally
+                        b = ready[0]
+                        being_cut.add(b.id)
+                        if b.cut_by is None:
+                            b.cut_by = 1
+                        remaining = self.CUT_TIME - b.cut_progress
+                        cut(b, remaining, 1, is_partial=False)
+                        team1_free = time + remaining
                     else:
-                        # No work available - find next event to wake up at
-                        next_events = [self.TOTAL_HOURS, form_area_free, oven1_free]
+                        # Nothing to do - wait for next event
+                        next_events = [self.TOTAL_HOURS, form_area_free]
+                        # Wait until it's time to start forming
+                        if sheets_available:
+                            next_events.append(oven1_free - self.FORM_TIME)
                         for b in batches:
                             if b.cure_end > time and b.cut_end is None:
                                 next_events.append(b.cure_end)
