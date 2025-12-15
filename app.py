@@ -53,6 +53,14 @@ class ProductionSimulator:
         self.CURE_WB_MIN = config.get('cure_wb_min', 24)
         self.CURE_WB_MAX = config.get('cure_wb_max', 36)
         
+        # Cure time distribution weights
+        cure_range = int(self.CURE_WB_MAX - self.CURE_WB_MIN) + 1
+        default_weights = [1.0] * cure_range
+        self.CURE_WEIGHTS = config.get('cure_weights', default_weights)
+        # Ensure weights match range
+        if len(self.CURE_WEIGHTS) != cure_range:
+            self.CURE_WEIGHTS = default_weights
+        
         self.WB_SHEETS = config.get('wb_sheets', 3)
         self.BB_SHEETS = config.get('bb_sheets', 2)
         
@@ -76,6 +84,29 @@ class ProductionSimulator:
         
         self.collect_gantt_data = collect_gantt_data
         self.all_batches = []
+    
+    def _get_weighted_cure_time(self):
+        """Get a cure time using weighted distribution"""
+        weights = self.CURE_WEIGHTS
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return random.uniform(self.CURE_WB_MIN, self.CURE_WB_MAX)
+        
+        # Normalize weights
+        normalized = [w / total_weight for w in weights]
+        
+        # Random selection based on weights
+        r = random.random()
+        cumulative = 0
+        for i, w in enumerate(normalized):
+            cumulative += w
+            if r <= cumulative:
+                # Add some variation within the hour
+                base_hour = self.CURE_WB_MIN + i
+                return base_hour + random.random()  # e.g., 32.0 to 32.99
+        
+        # Fallback
+        return self.CURE_WB_MAX
     
     def simulate(self):
         time = 0.0
@@ -201,7 +232,8 @@ class ProductionSimulator:
             b.cook_end = b.cook_start + self.COOK_TIME
             
             if product == 'WB':
-                b.cure_time = random.uniform(self.CURE_WB_MIN, self.CURE_WB_MAX)
+                # Use weighted random for cure time
+                b.cure_time = self._get_weighted_cure_time()
                 wb_batches_formed += 1
             else:
                 b.cure_time = 0
