@@ -695,8 +695,8 @@ def simulate():
         sim = ProductionSimulator(config, collect_gantt_data=True)
         result = sim.simulate()
         
-        # Analyze bottlenecks if targets not met
-        bottleneck = analyze_bottleneck(sim, result)
+        # Analyze bottlenecks with what-if testing if targets not met
+        bottleneck = analyze_bottleneck_with_whatif(config, result)
         
         return jsonify({
             'success': True,
@@ -715,175 +715,200 @@ def simulate():
         return jsonify({'success': False, 'error': str(e)}), 400
 
 
-def analyze_bottleneck(sim, result):
-    """Analyze what's limiting production"""
+def analyze_bottleneck_with_whatif(config, result):
+    """Analyze bottlenecks by testing what-if scenarios"""
     wb_pct = result['wb_pct']
     bb_pct = result['bb_pct']
+    current_total = result['total']
     
     # If both targets met, no bottleneck
     if wb_pct >= 100 and bb_pct >= 100:
         return {
             'status': 'targets_met',
             'message': 'All production targets have been met!',
+            'whatif_results': [],
             'suggestions': []
         }
     
-    batches = sim.all_batches
-    if not batches:
-        return {
-            'status': 'no_data',
-            'message': 'No batch data available for analysis.',
-            'suggestions': []
+    # Run what-if scenarios
+    whatif_results = []
+    
+    # Get current config values
+    current_ovens = config.get('num_ovens', 5)
+    current_team = config.get('team_config', '1team')
+    current_wb_sheets = config.get('wb_sheets', 3)
+    current_bb_sheets = config.get('bb_sheets', 2)
+    
+    # Test 1: Add 1 oven
+    if current_ovens < 20:
+        test_config = {**config, 'num_ovens': current_ovens + 1}
+        test_result = ProductionSimulator(test_config).simulate()
+        gain = test_result['total'] - current_total
+        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        whatif_results.append({
+            'change': f'Add 1 oven ({current_ovens} → {current_ovens + 1})',
+            'type': 'oven',
+            'gain': gain,
+            'gain_pct': round(gain_pct, 1),
+            'new_wb_pct': round(test_result['wb_pct'], 1),
+            'new_bb_pct': round(test_result['bb_pct'], 1),
+            'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
+        })
+    
+    # Test 2: Upgrade team configuration
+    team_upgrades = {
+        '1team': '2team_6-6',
+        '2team_6-6': '2team_24-7',
+    }
+    if current_team in team_upgrades:
+        new_team = team_upgrades[current_team]
+        test_config = {**config, 'team_config': new_team}
+        test_result = ProductionSimulator(test_config).simulate()
+        gain = test_result['total'] - current_total
+        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        
+        team_labels = {
+            '2team_6-6': '2 Teams (6am-6pm)',
+            '2team_24-7': '2 Teams (24/7)',
         }
+        whatif_results.append({
+            'change': f'Upgrade to {team_labels.get(new_team, new_team)}',
+            'type': 'team',
+            'gain': gain,
+            'gain_pct': round(gain_pct, 1),
+            'new_wb_pct': round(test_result['wb_pct'], 1),
+            'new_bb_pct': round(test_result['bb_pct'], 1),
+            'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
+        })
     
-    # Calculate time utilization
-    total_hours = sim.TOTAL_HOURS
+    # Test 3: Add 1 WB sheet
+    if current_wb_sheets < 10:
+        test_config = {**config, 'wb_sheets': current_wb_sheets + 1}
+        test_result = ProductionSimulator(test_config).simulate()
+        gain = test_result['total'] - current_total
+        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        whatif_results.append({
+            'change': f'Add 1 WB sheet ({current_wb_sheets} → {current_wb_sheets + 1})',
+            'type': 'wb_sheet',
+            'gain': gain,
+            'gain_pct': round(gain_pct, 1),
+            'new_wb_pct': round(test_result['wb_pct'], 1),
+            'new_bb_pct': round(test_result['bb_pct'], 1),
+            'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
+        })
     
-    # Form area utilization
-    form_time_used = sum(b.form_end - b.form_start for b in batches if b.form_end)
-    form_utilization = (form_time_used / total_hours) * 100
+    # Test 4: Add 1 BB sheet
+    if current_bb_sheets < 10:
+        test_config = {**config, 'bb_sheets': current_bb_sheets + 1}
+        test_result = ProductionSimulator(test_config).simulate()
+        gain = test_result['total'] - current_total
+        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        whatif_results.append({
+            'change': f'Add 1 BB sheet ({current_bb_sheets} → {current_bb_sheets + 1})',
+            'type': 'bb_sheet',
+            'gain': gain,
+            'gain_pct': round(gain_pct, 1),
+            'new_wb_pct': round(test_result['wb_pct'], 1),
+            'new_bb_pct': round(test_result['bb_pct'], 1),
+            'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
+        })
     
-    # Oven utilization
-    oven_time_used = sum(b.cook_end - b.cook_start for b in batches if b.cook_end)
-    oven_utilization = (oven_time_used / total_hours) * 100
+    # Test 5: Disable cleaning (if enabled)
+    if config.get('cleaning_enabled', True):
+        test_config = {**config, 'cleaning_enabled': False}
+        test_result = ProductionSimulator(test_config).simulate()
+        gain = test_result['total'] - current_total
+        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        whatif_results.append({
+            'change': 'Disable daily cleaning',
+            'type': 'cleaning',
+            'gain': gain,
+            'gain_pct': round(gain_pct, 1),
+            'new_wb_pct': round(test_result['wb_pct'], 1),
+            'new_bb_pct': round(test_result['bb_pct'], 1),
+            'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
+        })
     
-    # Cut time analysis
-    cut_time_used = sum(b.cut_end - b.cut_start for b in batches if b.cut_end and b.cut_start)
+    # Sort by gain (highest first)
+    whatif_results.sort(key=lambda x: x['gain'], reverse=True)
     
-    # Count batches by type
-    wb_batches = len([b for b in batches if b.product == 'WB'])
-    bb_batches = len([b for b in batches if b.product == 'BB'])
-    
-    # Analyze cure time waiting (WB only)
-    wb_cure_wait = sum(b.cure_end - b.cure_start for b in batches if b.product == 'WB' and b.cure_end)
-    avg_wb_cure = wb_cure_wait / wb_batches if wb_batches > 0 else 0
-    
-    # Average cook times
-    avg_cook_time = sum(b.cook_end - b.cook_start for b in batches if b.cook_end) / len(batches) if batches else 0
-    
-    # Identify bottleneck
-    bottlenecks = []
+    # Generate suggestions based on results
     suggestions = []
+    primary_bottleneck = None
     
-    # Check oven utilization
-    if oven_utilization > 90:
-        bottlenecks.append({
-            'type': 'oven',
-            'severity': 'high',
-            'message': f'Oven utilization is very high ({oven_utilization:.1f}%)',
-            'detail': 'The oven is running almost constantly, limiting how many batches can be produced.'
-        })
-        suggestions.append('Consider adding more ovens or reducing cook times')
-        suggestions.append('Check if cook time distribution can be optimized')
-    elif oven_utilization > 75:
-        bottlenecks.append({
-            'type': 'oven',
-            'severity': 'medium',
-            'message': f'Oven utilization is high ({oven_utilization:.1f}%)',
-            'detail': 'The oven is frequently busy.'
-        })
+    if whatif_results:
+        best = whatif_results[0]
+        
+        if best['gain'] > 0:
+            # Determine primary bottleneck based on what helps most
+            if best['type'] == 'oven':
+                primary_bottleneck = {
+                    'type': 'oven',
+                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'message': 'Oven capacity is limiting production',
+                    'detail': f'Adding 1 oven would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                }
+                suggestions.append(f'Add 1 oven for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+            elif best['type'] == 'team':
+                primary_bottleneck = {
+                    'type': 'labor',
+                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'message': 'Worker capacity is limiting production',
+                    'detail': f'Adding workers would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                }
+                suggestions.append(f'Upgrade team configuration for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+            elif best['type'] == 'wb_sheet':
+                primary_bottleneck = {
+                    'type': 'wb_sheets',
+                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'message': 'WB sheet limit is constraining production',
+                    'detail': f'Adding 1 WB sheet would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                }
+                suggestions.append(f'Add 1 WB sheet for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+            elif best['type'] == 'bb_sheet':
+                primary_bottleneck = {
+                    'type': 'bb_sheets',
+                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'message': 'BB sheet limit is constraining production',
+                    'detail': f'Adding 1 BB sheet would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                }
+                suggestions.append(f'Add 1 BB sheet for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+            elif best['type'] == 'cleaning':
+                primary_bottleneck = {
+                    'type': 'cleaning',
+                    'severity': 'low',
+                    'message': 'Cleaning overhead is affecting production',
+                    'detail': f'Disabling cleaning would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                }
+                suggestions.append(f'Cleaning overhead costs {best["gain"]:,} units ({best["gain_pct"]}%)')
+        
+        # Add other helpful changes as suggestions
+        for item in whatif_results[1:4]:  # Next 3 best options
+            if item['gain'] > 0:
+                suggestions.append(f'{item["change"]}: +{item["gain"]:,} units ({item["gain_pct"]}%)')
+        
+        # Check if any single change meets targets
+        meets_target = [w for w in whatif_results if w['meets_targets']]
+        if meets_target:
+            suggestions.insert(0, f"✓ '{meets_target[0]['change']}' would meet both targets!")
     
-    # Check form area utilization
-    if form_utilization > 85:
-        bottlenecks.append({
-            'type': 'form_area',
-            'severity': 'high',
-            'message': f'Form area utilization is very high ({form_utilization:.1f}%)',
-            'detail': 'Workers are spending most of their time forming batches.'
-        })
-        suggestions.append('Consider adding a second team to help with forming')
-        suggestions.append('Check if form time can be reduced')
-    elif form_utilization < 40 and (wb_pct < 100 or bb_pct < 100):
-        bottlenecks.append({
-            'type': 'form_area',
-            'severity': 'info',
-            'message': f'Form area utilization is low ({form_utilization:.1f}%)',
-            'detail': 'Workers have idle time but targets not met - check sheet limits or cure backlog.'
-        })
-    
-    # Check sheet constraints
-    wb_needed = sim.WB_TARGET / sim.WB_PER_BATCH
-    bb_needed = sim.BB_TARGET / sim.BB_PER_BATCH
-    
-    if wb_batches < wb_needed * 0.95 and wb_pct < 100:
-        # Not making enough WB batches
-        if sim.WB_SHEETS <= 2:
-            bottlenecks.append({
-                'type': 'wb_sheets',
-                'severity': 'medium',
-                'message': f'WB sheet limit may be constraining production ({sim.WB_SHEETS} sheets)',
-                'detail': f'Only {wb_batches} WB batches made, needed ~{wb_needed:.0f} for target.'
-            })
-            suggestions.append(f'Try increasing WB sheets from {sim.WB_SHEETS} to {sim.WB_SHEETS + 1}')
-    
-    if bb_batches < bb_needed * 0.95 and bb_pct < 100:
-        if sim.BB_SHEETS <= 2:
-            bottlenecks.append({
-                'type': 'bb_sheets',
-                'severity': 'medium',
-                'message': f'BB sheet limit may be constraining production ({sim.BB_SHEETS} sheets)',
-                'detail': f'Only {bb_batches} BB batches made, needed ~{bb_needed:.0f} for target.'
-            })
-            suggestions.append(f'Try increasing BB sheets from {sim.BB_SHEETS} to {sim.BB_SHEETS + 1}')
-    
-    # Check WB cure time impact
-    if wb_pct < bb_pct and avg_wb_cure > 28:
-        bottlenecks.append({
-            'type': 'cure_time',
-            'severity': 'medium',
-            'message': f'WB cure time averaging {avg_wb_cure:.1f} hours',
-            'detail': 'Long cure times delay WB production. Consider adjusting cure time distribution.'
-        })
-        suggestions.append('Skew cure time distribution toward shorter times')
-    
-    # Check strategy alignment
-    if abs(wb_pct - bb_pct) > 20:
-        bottlenecks.append({
-            'type': 'strategy',
-            'severity': 'medium',
-            'message': f'Production imbalance: WB {wb_pct:.1f}% vs BB {bb_pct:.1f}%',
-            'detail': 'The current strategy may not be optimal for your targets.'
-        })
+    # If no gains found, suggest strategy change
+    if not whatif_results or all(w['gain'] <= 0 for w in whatif_results):
+        suggestions.append('Try different priority strategies to optimize production balance')
         if wb_pct < bb_pct:
-            suggestions.append('Try WB-focused strategies: wb_first, cure_aware, or balanced_goal')
+            suggestions.append('WB is lagging - try wb_first, cure_aware, or balanced_goal strategies')
         else:
-            suggestions.append('Try BB-focused strategies: bb_first or ratio_batches')
-    
-    # Check cleaning impact
-    cleaning_events = getattr(sim, 'cleaning_events', [])
-    if cleaning_events:
-        total_clean_time = sum(e['end'] - e['start'] for e in cleaning_events)
-        clean_pct = (total_clean_time / total_hours) * 100
-        if clean_pct > 5:
-            bottlenecks.append({
-                'type': 'cleaning',
-                'severity': 'low',
-                'message': f'Cleaning takes {clean_pct:.1f}% of total time',
-                'detail': f'{len(cleaning_events)} cleaning events totaling {total_clean_time:.1f} hours.'
-            })
-    
-    # Determine primary bottleneck
-    if bottlenecks:
-        high_severity = [b for b in bottlenecks if b['severity'] == 'high']
-        primary = high_severity[0] if high_severity else bottlenecks[0]
-        status = 'bottleneck_found'
-    else:
-        primary = None
-        status = 'analysis_complete'
-        suggestions.append('Try running with different strategies to find optimal configuration')
+            suggestions.append('BB is lagging - try bb_first or ratio_batches strategies')
     
     return {
-        'status': status,
-        'primary': primary,
-        'all_bottlenecks': bottlenecks,
-        'suggestions': suggestions[:5],  # Limit to 5 suggestions
-        'stats': {
-            'form_utilization': round(form_utilization, 1),
-            'oven_utilization': round(oven_utilization, 1),
-            'wb_batches': wb_batches,
-            'bb_batches': bb_batches,
-            'avg_cook_time': round(avg_cook_time, 1),
-            'avg_wb_cure': round(avg_wb_cure, 1),
+        'status': 'bottleneck_found' if primary_bottleneck else 'analysis_complete',
+        'primary': primary_bottleneck,
+        'whatif_results': whatif_results,
+        'suggestions': suggestions[:5],
+        'current_production': {
+            'total': current_total,
+            'wb_pct': round(wb_pct, 1),
+            'bb_pct': round(bb_pct, 1),
         }
     }
 
