@@ -1463,15 +1463,18 @@ def gantt_image():
                                            fontsize=6, color='darkred', fontweight='bold')
                 
                 elif event_type == 'oven_clean':
-                    # Draw on cook/oven row
+                    # Draw on cook/oven row - only on the specific oven that was cleaned
+                    oven_set = event.get('oven_set', 1)
                     for i, (label, stage, team_filter) in enumerate(rows):
                         if stage == 'cook':
-                            y = y_positions[i]
-                            ax.barh(y, e - s, left=s, height=0.6, color='#DDA0DD', 
-                                   edgecolor='purple', linewidth=1.5, hatch='\\\\')
-                            if e - s > 1:
-                                ax.text((s + e) / 2, y, 'CLEAN', ha='center', va='center', 
-                                       fontsize=6, color='purple', fontweight='bold')
+                            # team_filter here is actually oven_set filter for cook rows
+                            if team_filter is None or team_filter == oven_set:
+                                y = y_positions[i]
+                                ax.barh(y, e - s, left=s, height=0.6, color='#DDA0DD', 
+                                       edgecolor='purple', linewidth=1.5, hatch='\\\\')
+                                if e - s > 1:
+                                    ax.text((s + e) / 2, y, 'CLEAN', ha='center', va='center', 
+                                           fontsize=6, color='purple', fontweight='bold')
             
             ax.set_yticks(y_positions)
             ax.set_yticklabels(y_labels)
