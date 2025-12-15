@@ -106,6 +106,7 @@ class ProductionSimulator:
         
         self.collect_gantt_data = collect_gantt_data
         self.all_batches = []
+        self.cleaning_events = []
     
     def _get_weighted_cook_time(self, product):
         """Get a cook time using weighted distribution based on product type"""
@@ -192,13 +193,61 @@ class ProductionSimulator:
         oven2_free = 0.0
         
         # Daily cleaning tracking
-        last_form_clean_day = -1
+        last_form_clean_day_team1 = -1
+        last_form_clean_day_team2 = -1
         last_oven_clean_day = -1
-        form_clean_done_today = False
-        oven_clean_done_today = False
+        
+        # Cleaning events for Gantt chart
+        cleaning_events = []
         
         def get_current_day(t):
             return int(t // 24)
+        
+        def needs_form_clean(team_num, t):
+            current_day = get_current_day(t)
+            if team_num == 1:
+                return current_day > last_form_clean_day_team1
+            else:
+                return current_day > last_form_clean_day_team2
+        
+        def needs_oven_clean(t):
+            current_day = get_current_day(t)
+            return current_day > last_oven_clean_day
+        
+        def do_form_clean(team_num, t):
+            nonlocal last_form_clean_day_team1, last_form_clean_day_team2
+            clean_end = t + self.FORM_CLEAN_TIME
+            current_day = get_current_day(t)
+            if team_num == 1:
+                last_form_clean_day_team1 = current_day
+            else:
+                last_form_clean_day_team2 = current_day
+            if self.collect_gantt_data:
+                cleaning_events.append({
+                    'type': 'form_clean',
+                    'team': team_num,
+                    'start': t,
+                    'end': clean_end
+                })
+            return clean_end
+        
+        def do_oven_clean(team_num, t):
+            nonlocal last_oven_clean_day, oven1_free, oven2_free
+            oven_clean_time = self._get_weighted_oven_clean_time()
+            clean_end = t + oven_clean_time
+            current_day = get_current_day(t)
+            last_oven_clean_day = current_day
+            oven1_free = clean_end
+            if self.NUM_OVEN_SETS == 2:
+                oven2_free = clean_end
+            if self.collect_gantt_data:
+                cleaning_events.append({
+                    'type': 'oven_clean',
+                    'team': team_num,
+                    'start': t,
+                    'end': clean_end
+                })
+            return clean_end
         
         def team2_enabled():
             return self.TEAM_CONFIG != '1team'
@@ -451,23 +500,6 @@ class ProductionSimulator:
         while time < self.TOTAL_HOURS:
             current_day = get_current_day(time)
             
-            # Check if we need to do daily cleaning
-            if current_day > last_form_clean_day:
-                # Form cleaning - takes FORM_CLEAN_TIME, done by worker (blocks team1)
-                if team1_free <= time:
-                    team1_free = time + self.FORM_CLEAN_TIME
-                    last_form_clean_day = current_day
-            
-            if current_day > last_oven_clean_day:
-                # Oven cleaning - takes random time, blocks oven AND worker
-                if team1_free <= time and oven1_free <= time:
-                    oven_clean_time = self._get_weighted_oven_clean_time()
-                    team1_free = time + oven_clean_time
-                    oven1_free = time + oven_clean_time
-                    if self.NUM_OVEN_SETS == 2 and oven2_free <= time:
-                        oven2_free = time + oven_clean_time
-                    last_oven_clean_day = current_day
-            
             batches = [b for b in batches if b.cut_end is None or b.cut_end > time]
             sheets_claimed_wb = 0
             sheets_claimed_bb = 0
@@ -480,32 +512,91 @@ class ProductionSimulator:
                         if last_session[1] > time:
                             being_cut.add(b.id)
             
-            if team1_free <= time:
-                deadline1 = oven1_free - self.FORM_TIME
-                result = do_work(1, deadline1, is_team2=False)
-                if isinstance(result, tuple):
-                    team1_free = result[0]
-                    if result[1] is not None:
-                        being_cut.add(result[1])
-                else:
-                    team1_free = result
+            # Calculate hours until end of day (cleaning deadline)
+            end_of_day = (current_day + 1) * 24
+            hours_left_today = end_of_day - time
             
+            # Check cleaning needs
+            form_clean_needed_t1 = needs_form_clean(1, time)
+            oven_clean_needed = needs_oven_clean(time)
+            
+            # Estimate time needed for remaining cleaning
+            time_for_form_clean = self.FORM_CLEAN_TIME if form_clean_needed_t1 else 0
+            time_for_oven_clean = self.OVEN_CLEAN_MAX if oven_clean_needed else 0
+            total_clean_time_needed = time_for_form_clean + time_for_oven_clean
+            
+            # TEAM 1 WORK
+            if team1_free <= time:
+                # Determine if we must prioritize cleaning (running out of time today)
+                # This prevents starting new work when we need to clean soon
+                must_clean_now = hours_left_today <= total_clean_time_needed + 1.0
+                
+                if must_clean_now and form_clean_needed_t1:
+                    # Do form cleaning immediately (worker is free = not currently forming)
+                    team1_free = do_form_clean(1, time)
+                elif must_clean_now and oven_clean_needed and oven1_free <= time:
+                    # Do oven cleaning (worker free and oven free = oven done cooking)
+                    team1_free = do_oven_clean(1, time)
+                else:
+                    # Check if there's work to do
+                    ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
+                    can_form = (oven1_free <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                    
+                    if ready or can_form:
+                        # Do normal work
+                        deadline1 = oven1_free - self.FORM_TIME
+                        result = do_work(1, deadline1, is_team2=False)
+                        if isinstance(result, tuple):
+                            team1_free = result[0]
+                            if result[1] is not None:
+                                being_cut.add(result[1])
+                        else:
+                            team1_free = result
+                    else:
+                        # No work available - use downtime for cleaning
+                        if form_clean_needed_t1:
+                            team1_free = do_form_clean(1, time)
+                        elif oven_clean_needed and oven1_free <= time:
+                            team1_free = do_oven_clean(1, time)
+                        # else: no work and no cleaning needed, time will advance
+            
+            # TEAM 2 WORK
             if team2_enabled():
                 if not team2_on(time):
                     team2_free = next_team2_start(time)
                 elif team2_free <= time:
-                    if self.NUM_OVEN_SETS == 2:
-                        deadline2 = oven2_free - self.FORM_TIME
-                        oven_num = 2
+                    form_clean_needed_t2 = needs_form_clean(2, time)
+                    time_for_form_clean_t2 = self.FORM_CLEAN_TIME if form_clean_needed_t2 else 0
+                    must_clean_now_t2 = hours_left_today <= time_for_form_clean_t2 + 1.0
+                    
+                    if must_clean_now_t2 and form_clean_needed_t2:
+                        # Must clean now
+                        team2_free = do_form_clean(2, time)
                     else:
-                        deadline2 = oven1_free - self.FORM_TIME
-                        oven_num = 1
-                    shift_end = team2_shift_end(time)
-                    result = do_work(oven_num, deadline2, shift_end, is_team2=True)
-                    if isinstance(result, tuple):
-                        team2_free = result[0]
-                    else:
-                        team2_free = result
+                        # Check if there's work to do
+                        ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
+                        oven_for_team2 = oven2_free if self.NUM_OVEN_SETS == 2 else oven1_free
+                        can_form = (oven_for_team2 <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                        
+                        if ready or can_form:
+                            # Do normal work
+                            if self.NUM_OVEN_SETS == 2:
+                                deadline2 = oven2_free - self.FORM_TIME
+                                oven_num = 2
+                            else:
+                                deadline2 = oven1_free - self.FORM_TIME
+                                oven_num = 1
+                            shift_end = team2_shift_end(time)
+                            result = do_work(oven_num, deadline2, shift_end, is_team2=True)
+                            if isinstance(result, tuple):
+                                team2_free = result[0]
+                            else:
+                                team2_free = result
+                        else:
+                            # No work available - use downtime for cleaning
+                            if form_clean_needed_t2:
+                                team2_free = do_form_clean(2, time)
+                            # Team 2 doesn't do oven cleaning (Team 1 handles it)
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME]
             # Add next day start time for cleaning check
@@ -527,6 +618,7 @@ class ProductionSimulator:
         
         if self.collect_gantt_data:
             self.all_batches = all_batches
+            self.cleaning_events = cleaning_events
         
         wb_pct = 100 * total_wb / self.WB_TARGET if self.WB_TARGET > 0 else 0
         bb_pct = 100 * total_bb / self.BB_TARGET if self.BB_TARGET > 0 else 0
@@ -916,6 +1008,43 @@ def gantt_image():
                                 ax.text((s + e) / 2, y, f'{product}{b.id}', ha='center', va='center', 
                                        fontsize=fontsize, color='white')
             
+            # Draw cleaning events
+            cleaning_events = getattr(sim, 'cleaning_events', [])
+            for event in cleaning_events:
+                event_start = event['start']
+                event_end = event['end']
+                event_type = event['type']
+                team = event['team']
+                
+                if event_start >= end_hour or event_end <= start_hour:
+                    continue
+                
+                s = max(event_start, start_hour)
+                e = min(event_end, end_hour)
+                
+                if event_type == 'form_clean':
+                    # Draw on form row
+                    for i, (label, stage, team_filter) in enumerate(rows):
+                        if stage == 'form':
+                            if team_filter is None or team_filter == team:
+                                y = y_positions[i]
+                                ax.barh(y, e - s, left=s, height=0.6, color='#FFB6C1', 
+                                       edgecolor='red', linewidth=1.5, hatch='\\\\')
+                                if e - s > 1:
+                                    ax.text((s + e) / 2, y, 'CLEAN', ha='center', va='center', 
+                                           fontsize=6, color='darkred', fontweight='bold')
+                
+                elif event_type == 'oven_clean':
+                    # Draw on cook/oven row
+                    for i, (label, stage, team_filter) in enumerate(rows):
+                        if stage == 'cook':
+                            y = y_positions[i]
+                            ax.barh(y, e - s, left=s, height=0.6, color='#DDA0DD', 
+                                   edgecolor='purple', linewidth=1.5, hatch='\\\\')
+                            if e - s > 1:
+                                ax.text((s + e) / 2, y, 'CLEAN', ha='center', va='center', 
+                                       fontsize=6, color='purple', fontweight='bold')
+            
             ax.set_yticks(y_positions)
             ax.set_yticklabels(y_labels)
             ax.set_xlim(start_hour, end_hour)
@@ -943,8 +1072,10 @@ def gantt_image():
                 mpatches.Patch(color=colors['cut_wb'], label='Cut WB'),
                 mpatches.Patch(color=colors['cut_bb'], label='Cut BB'),
                 mpatches.Patch(facecolor=colors['cut_wb'], hatch='///', label='Paused Cut'),
+                mpatches.Patch(facecolor='#FFB6C1', edgecolor='red', hatch='\\\\', label='Form Clean'),
+                mpatches.Patch(facecolor='#DDA0DD', edgecolor='purple', hatch='\\\\', label='Oven Clean'),
             ]
-            ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
             ax.grid(axis='x', alpha=0.3)
             
         else:  # workers chart
