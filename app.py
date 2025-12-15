@@ -49,17 +49,39 @@ class ProductionSimulator:
         self.WB_PER_BATCH = int(config.get('wb_per_batch', 3000) * scale)
         self.BB_PER_BATCH = int(config.get('bb_per_batch', 6000) * scale)
         
-        self.COOK_TIME = config.get('cook_time', 10)
+        # Multiple cook times for WB and BB
+        self.WB_COOK_TIMES = config.get('wb_cook_times', [9.25, 16.0, 6.5, 12.167, 10.75, 11.167, 8.5, 6.33])
+        self.WB_COOK_WEIGHTS = config.get('wb_cook_weights', [1.0] * len(self.WB_COOK_TIMES))
+        self.BB_COOK_TIMES = config.get('bb_cook_times', [8.333, 10.0])
+        self.BB_COOK_WEIGHTS = config.get('bb_cook_weights', [1.0] * len(self.BB_COOK_TIMES))
+        
+        # Ensure weights match times
+        if len(self.WB_COOK_WEIGHTS) != len(self.WB_COOK_TIMES):
+            self.WB_COOK_WEIGHTS = [1.0] * len(self.WB_COOK_TIMES)
+        if len(self.BB_COOK_WEIGHTS) != len(self.BB_COOK_TIMES):
+            self.BB_COOK_WEIGHTS = [1.0] * len(self.BB_COOK_TIMES)
+        
         self.CURE_WB_MIN = config.get('cure_wb_min', 24)
         self.CURE_WB_MAX = config.get('cure_wb_max', 36)
         
         # Cure time distribution weights
         cure_range = int(self.CURE_WB_MAX - self.CURE_WB_MIN) + 1
-        default_weights = [1.0] * cure_range
-        self.CURE_WEIGHTS = config.get('cure_weights', default_weights)
-        # Ensure weights match range
+        default_cure_weights = [1.0] * cure_range
+        self.CURE_WEIGHTS = config.get('cure_weights', default_cure_weights)
         if len(self.CURE_WEIGHTS) != cure_range:
-            self.CURE_WEIGHTS = default_weights
+            self.CURE_WEIGHTS = default_cure_weights
+        
+        # Daily cleaning settings
+        self.FORM_CLEAN_TIME = config.get('form_clean_time', 1.0)
+        self.OVEN_CLEAN_MIN = config.get('oven_clean_min', 1.0)
+        self.OVEN_CLEAN_MAX = config.get('oven_clean_max', 1.0)
+        
+        # Oven clean time distribution weights
+        oven_clean_range = int(self.OVEN_CLEAN_MAX - self.OVEN_CLEAN_MIN) + 1
+        default_oven_weights = [1.0] * max(1, oven_clean_range)
+        self.OVEN_CLEAN_WEIGHTS = config.get('oven_clean_weights', default_oven_weights)
+        if len(self.OVEN_CLEAN_WEIGHTS) != oven_clean_range:
+            self.OVEN_CLEAN_WEIGHTS = default_oven_weights
         
         self.WB_SHEETS = config.get('wb_sheets', 3)
         self.BB_SHEETS = config.get('bb_sheets', 2)
@@ -84,6 +106,52 @@ class ProductionSimulator:
         
         self.collect_gantt_data = collect_gantt_data
         self.all_batches = []
+    
+    def _get_weighted_cook_time(self, product):
+        """Get a cook time using weighted distribution based on product type"""
+        if product == 'WB':
+            times = self.WB_COOK_TIMES
+            weights = self.WB_COOK_WEIGHTS
+        else:
+            times = self.BB_COOK_TIMES
+            weights = self.BB_COOK_WEIGHTS
+        
+        if not times:
+            return 10.0  # Default fallback
+        
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return random.choice(times)
+        
+        # Normalize and select
+        r = random.random() * total_weight
+        cumulative = 0
+        for i, w in enumerate(weights):
+            cumulative += w
+            if r <= cumulative:
+                return times[i]
+        
+        return times[-1]
+    
+    def _get_weighted_oven_clean_time(self):
+        """Get oven cleaning time using weighted distribution"""
+        if self.OVEN_CLEAN_MIN >= self.OVEN_CLEAN_MAX:
+            return self.OVEN_CLEAN_MIN
+        
+        weights = self.OVEN_CLEAN_WEIGHTS
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return random.uniform(self.OVEN_CLEAN_MIN, self.OVEN_CLEAN_MAX)
+        
+        r = random.random() * total_weight
+        cumulative = 0
+        for i, w in enumerate(weights):
+            cumulative += w
+            if r <= cumulative:
+                base_hour = self.OVEN_CLEAN_MIN + i
+                return base_hour + random.random()
+        
+        return self.OVEN_CLEAN_MAX
     
     def _get_weighted_cure_time(self):
         """Get a cure time using weighted distribution"""
@@ -122,6 +190,15 @@ class ProductionSimulator:
         team2_free = 0.0
         oven1_free = 0.0
         oven2_free = 0.0
+        
+        # Daily cleaning tracking
+        last_form_clean_day = -1
+        last_oven_clean_day = -1
+        form_clean_done_today = False
+        oven_clean_done_today = False
+        
+        def get_current_day(t):
+            return int(t // 24)
         
         def team2_enabled():
             return self.TEAM_CONFIG != '1team'
@@ -228,8 +305,10 @@ class ProductionSimulator:
             b.form_end = time + self.FORM_TIME
             b.formed_by = team_num
             
+            # Randomly select cook time from available options based on weights
+            cook_time = self._get_weighted_cook_time(product)
             b.cook_start = b.form_end
-            b.cook_end = b.cook_start + self.COOK_TIME
+            b.cook_end = b.cook_start + cook_time
             
             if product == 'WB':
                 # Use weighted random for cure time
@@ -370,6 +449,25 @@ class ProductionSimulator:
         
         # Main simulation loop
         while time < self.TOTAL_HOURS:
+            current_day = get_current_day(time)
+            
+            # Check if we need to do daily cleaning
+            if current_day > last_form_clean_day:
+                # Form cleaning - takes FORM_CLEAN_TIME, done by worker (blocks team1)
+                if team1_free <= time:
+                    team1_free = time + self.FORM_CLEAN_TIME
+                    last_form_clean_day = current_day
+            
+            if current_day > last_oven_clean_day:
+                # Oven cleaning - takes random time, blocks oven AND worker
+                if team1_free <= time and oven1_free <= time:
+                    oven_clean_time = self._get_weighted_oven_clean_time()
+                    team1_free = time + oven_clean_time
+                    oven1_free = time + oven_clean_time
+                    if self.NUM_OVEN_SETS == 2 and oven2_free <= time:
+                        oven2_free = time + oven_clean_time
+                    last_oven_clean_day = current_day
+            
             batches = [b for b in batches if b.cut_end is None or b.cut_end > time]
             sheets_claimed_wb = 0
             sheets_claimed_bb = 0
@@ -410,6 +508,10 @@ class ProductionSimulator:
                         team2_free = result
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME]
+            # Add next day start time for cleaning check
+            next_day_start = (current_day + 1) * 24
+            if next_day_start < self.TOTAL_HOURS:
+                events.append(next_day_start)
             if self.NUM_OVEN_SETS == 2:
                 events.extend([oven2_free, oven2_free - self.FORM_TIME])
             if team2_enabled():
