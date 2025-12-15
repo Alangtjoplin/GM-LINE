@@ -72,6 +72,7 @@ class ProductionSimulator:
             self.CURE_WEIGHTS = default_cure_weights
         
         # Daily cleaning settings
+        self.CLEANING_ENABLED = config.get('cleaning_enabled', True)
         self.FORM_CLEAN_TIME = config.get('form_clean_time', 1.0)
         self.OVEN_CLEAN_MIN = config.get('oven_clean_min', 1.0)
         self.OVEN_CLEAN_MAX = config.get('oven_clean_max', 1.0)
@@ -204,6 +205,8 @@ class ProductionSimulator:
             return int(t // 24)
         
         def needs_form_clean(team_num, t):
+            if not self.CLEANING_ENABLED:
+                return False
             current_day = get_current_day(t)
             if team_num == 1:
                 return current_day > last_form_clean_day_team1
@@ -211,6 +214,8 @@ class ProductionSimulator:
                 return current_day > last_form_clean_day_team2
         
         def needs_oven_clean(t):
+            if not self.CLEANING_ENABLED:
+                return False
             current_day = get_current_day(t)
             return current_day > last_oven_clean_day
         
@@ -527,16 +532,21 @@ class ProductionSimulator:
             
             # TEAM 1 WORK
             if team1_free <= time:
-                # Determine if we must prioritize cleaning (running out of time today)
-                # This prevents starting new work when we need to clean soon
-                must_clean_now = hours_left_today <= total_clean_time_needed + 1.0
+                # Determine if we must prioritize cleaning
+                # Be aggressive: if less than 4 hours left or less than cleaning time + buffer
+                must_clean_soon = hours_left_today <= max(total_clean_time_needed + 2.0, 4.0)
                 
-                if must_clean_now and form_clean_needed_t1:
-                    # Do form cleaning immediately (worker is free = not currently forming)
+                # PRIORITY 1: Form cleaning if running out of time
+                if form_clean_needed_t1 and must_clean_soon:
                     team1_free = do_form_clean(1, time)
-                elif must_clean_now and oven_clean_needed and oven1_free <= time:
-                    # Do oven cleaning (worker free and oven free = oven done cooking)
+                # PRIORITY 2: Oven cleaning - if oven is free, clean it
+                elif oven_clean_needed and oven1_free <= time:
                     team1_free = do_oven_clean(1, time)
+                # PRIORITY 3: If oven cleaning needed and running out of time, WAIT for oven
+                elif oven_clean_needed and must_clean_soon and oven1_free > time:
+                    # Don't start new work - wait for oven to be free so we can clean it
+                    # The time will advance to when oven is free
+                    team1_free = oven1_free  # Worker waits for oven
                 else:
                     # Check if there's work to do
                     ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
