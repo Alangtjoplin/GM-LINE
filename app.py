@@ -1394,13 +1394,35 @@ def gantt_image():
             ax.set_xlim(start_hour, end_hour)
             ax.set_xlabel('Hours')
             
-            # Day markers
-            for day in range(int(start_hour // 24), int(end_hour // 24) + 1):
-                day_hour = day * 24
-                if start_hour <= day_hour <= end_hour:
-                    color = 'red' if day % 7 == 0 else 'blue'
-                    style = '--' if day % 7 == 0 else ':'
-                    ax.axvline(x=day_hour, color=color, linestyle=style, alpha=0.5)
+            # Draw grid lines: light grey every 8 hours, dark grey every 24 hours
+            for hour in range(int(start_hour), int(end_hour) + 1, 8):
+                if hour >= start_hour and hour <= end_hour:
+                    if hour % 24 == 0:
+                        # Dark grey for 24-hour marks (drawn second to take priority)
+                        pass  # Will draw below
+                    else:
+                        # Light grey for 8-hour marks
+                        ax.axvline(x=hour, color='lightgrey', linestyle='-', alpha=0.5, linewidth=0.8)
+            
+            # Draw 24-hour lines on top (dark grey)
+            for hour in range(int(start_hour // 24) * 24, int(end_hour) + 1, 24):
+                if hour >= start_hour and hour <= end_hour:
+                    ax.axvline(x=hour, color='darkgrey', linestyle='-', alpha=0.8, linewidth=1.2)
+            
+            # Draw Team 2 working hours (dotted lines) if Team 2 is enabled
+            if has_team2 and sim.TEAM_CONFIG == '2team_6-6':
+                team2_start = sim.TEAM2_START  # e.g., 6
+                team2_end = sim.TEAM2_END      # e.g., 18
+                
+                # For each day in the range, draw dotted lines at shift start/end
+                for day in range(int(start_hour // 24), int(end_hour // 24) + 2):
+                    shift_start = day * 24 + team2_start
+                    shift_end = day * 24 + team2_end
+                    
+                    if shift_start >= start_hour and shift_start <= end_hour:
+                        ax.axvline(x=shift_start, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+                    if shift_end >= start_hour and shift_end <= end_hour:
+                        ax.axvline(x=shift_end, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
             
             title = f'Production Flow - Week {week} (Hours {start_hour}-{end_hour})'
             title += f'\n{sim.TEAM_CONFIG}, {sim.config.get("num_ovens", 5)} ovens, Strategy: {sim.PRIORITY_STRATEGY}'
@@ -1420,7 +1442,6 @@ def gantt_image():
                 mpatches.Patch(facecolor='#DDA0DD', edgecolor='purple', hatch='\\\\', label='Oven Clean'),
             ]
             ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-            ax.grid(axis='x', alpha=0.3)
             
         else:  # workers chart
             if has_team2:
@@ -1531,6 +1552,33 @@ def gantt_image():
             ax.set_xlim(start_hour, end_hour)
             ax.set_xlabel('Hours')
             
+            # Draw grid lines: light grey every 8 hours, dark grey every 24 hours
+            for hour in range(int(start_hour), int(end_hour) + 1, 8):
+                if hour >= start_hour and hour <= end_hour:
+                    if hour % 24 == 0:
+                        pass  # Will draw below
+                    else:
+                        ax.axvline(x=hour, color='lightgrey', linestyle='-', alpha=0.5, linewidth=0.8)
+            
+            # Draw 24-hour lines on top (dark grey)
+            for hour in range(int(start_hour // 24) * 24, int(end_hour) + 1, 24):
+                if hour >= start_hour and hour <= end_hour:
+                    ax.axvline(x=hour, color='darkgrey', linestyle='-', alpha=0.8, linewidth=1.2)
+            
+            # Draw Team 2 working hours (dotted lines) if Team 2 is enabled
+            if has_team2 and sim.TEAM_CONFIG == '2team_6-6':
+                team2_start = sim.TEAM2_START
+                team2_end = sim.TEAM2_END
+                
+                for day in range(int(start_hour // 24), int(end_hour // 24) + 2):
+                    shift_start = day * 24 + team2_start
+                    shift_end = day * 24 + team2_end
+                    
+                    if shift_start >= start_hour and shift_start <= end_hour:
+                        ax.axvline(x=shift_start, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+                    if shift_end >= start_hour and shift_end <= end_hour:
+                        ax.axvline(x=shift_end, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
+            
             title = f'Worker Activity - Week {week} (Hours {start_hour}-{end_hour})'
             title += f'\n{sim.TEAM_CONFIG}, Strategy: {sim.PRIORITY_STRATEGY}'
             ax.set_title(title, fontsize=12, fontweight='bold')
@@ -1545,7 +1593,6 @@ def gantt_image():
                 mpatches.Patch(facecolor='#DDA0DD', edgecolor='#8B008B', hatch='\\\\', label='Oven Clean'),
             ]
             ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
-            ax.grid(axis='x', alpha=0.3)
         
         plt.tight_layout()
         
