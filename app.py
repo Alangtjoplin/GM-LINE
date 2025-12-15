@@ -202,7 +202,8 @@ class ProductionSimulator:
         # Daily cleaning tracking - track actual time of last clean
         # Form area is shared, so only ONE cleaning time for both teams
         last_form_clean_time = -24.0  # Start needing clean
-        last_oven_clean_time = -24.0
+        last_oven1_clean_time = -24.0  # Track oven 1 cleaning separately
+        last_oven2_clean_time = -24.0  # Track oven 2 cleaning separately
         
         # Cleaning events for Gantt chart
         cleaning_events = []
@@ -210,18 +211,28 @@ class ProductionSimulator:
         def hours_since_form_clean(t):
             return t - last_form_clean_time
         
-        def hours_since_oven_clean(t):
-            return t - last_oven_clean_time
+        def hours_since_oven1_clean(t):
+            return t - last_oven1_clean_time
+        
+        def hours_since_oven2_clean(t):
+            return t - last_oven2_clean_time
         
         def needs_form_clean(t):
             if not self.CLEANING_ENABLED:
                 return False
             return hours_since_form_clean(t) >= 24.0
         
-        def needs_oven_clean(t):
+        def needs_oven1_clean(t):
             if not self.CLEANING_ENABLED:
                 return False
-            return hours_since_oven_clean(t) >= 24.0
+            return hours_since_oven1_clean(t) >= 24.0
+        
+        def needs_oven2_clean(t):
+            if not self.CLEANING_ENABLED:
+                return False
+            if self.NUM_OVEN_SETS < 2:
+                return False
+            return hours_since_oven2_clean(t) >= 24.0
         
         def must_clean_form_urgently(t):
             """Returns True if it's been 22+ hours - getting urgent"""
@@ -229,11 +240,19 @@ class ProductionSimulator:
                 return False
             return hours_since_form_clean(t) >= 22.0
         
-        def must_clean_oven_urgently(t):
+        def must_clean_oven1_urgently(t):
             """Returns True if it's been 22+ hours - getting urgent"""
             if not self.CLEANING_ENABLED:
                 return False
-            return hours_since_oven_clean(t) >= 22.0
+            return hours_since_oven1_clean(t) >= 22.0
+        
+        def must_clean_oven2_urgently(t):
+            """Returns True if it's been 22+ hours - getting urgent"""
+            if not self.CLEANING_ENABLED:
+                return False
+            if self.NUM_OVEN_SETS < 2:
+                return False
+            return hours_since_oven2_clean(t) >= 22.0
         
         def do_form_clean(team_num, t):
             nonlocal last_form_clean_time, form_area_free
@@ -249,18 +268,35 @@ class ProductionSimulator:
                 })
             return clean_end
         
-        def do_oven_clean(team_num, t):
-            nonlocal last_oven_clean_time, oven1_free, oven2_free
+        def do_oven1_clean(team_num, t):
+            nonlocal last_oven1_clean_time, oven1_free
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
-            last_oven_clean_time = t
+            last_oven1_clean_time = t
             oven1_free = clean_end
-            if self.NUM_OVEN_SETS == 2:
-                oven2_free = clean_end
             if self.collect_gantt_data:
                 cleaning_events.append({
                     'type': 'oven_clean',
                     'team': team_num,
+                    'oven_set': 1,
+                    'start': t,
+                    'end': clean_end
+                })
+            return clean_end
+        
+        def do_oven2_clean(team_num, t):
+            nonlocal last_oven2_clean_time, oven2_free
+            if self.NUM_OVEN_SETS < 2:
+                return t  # No oven 2, return immediately
+            oven_clean_time = self._get_weighted_oven_clean_time()
+            clean_end = t + oven_clean_time
+            last_oven2_clean_time = t
+            oven2_free = clean_end
+            if self.collect_gantt_data:
+                cleaning_events.append({
+                    'type': 'oven_clean',
+                    'team': team_num,
+                    'oven_set': 2,
                     'start': t,
                     'end': clean_end
                 })
@@ -560,10 +596,13 @@ class ProductionSimulator:
             
             # Check cleaning needs (time-based: 24+ hours since last clean)
             # Form area is SHARED - only one cleaning needed for both teams
+            # Ovens are cleaned INDEPENDENTLY
             form_clean_needed = needs_form_clean(time)
-            oven_clean_needed = needs_oven_clean(time)
+            oven1_clean_needed = needs_oven1_clean(time)
+            oven2_clean_needed = needs_oven2_clean(time)  # Returns False if only 1 oven set
             form_clean_urgent = must_clean_form_urgently(time)
-            oven_clean_urgent = must_clean_oven_urgently(time)
+            oven1_clean_urgent = must_clean_oven1_urgently(time)
+            oven2_clean_urgent = must_clean_oven2_urgently(time)  # Returns False if only 1 oven set
             
             def get_best_oven():
                 """Returns (oven_num, oven_free_time) for the oven that will be free soonest"""
@@ -580,12 +619,20 @@ class ProductionSimulator:
                     return oven1_free <= time or oven2_free <= time
                 return oven1_free <= time
             
-            def get_free_oven():
-                """Get the number of a currently free oven, or None"""
-                if oven1_free <= time:
+            def get_free_oven_needing_clean():
+                """Get the number of a currently free oven that needs cleaning, or None"""
+                if oven1_clean_needed and oven1_free <= time:
                     return 1
-                if self.NUM_OVEN_SETS == 2 and oven2_free <= time:
+                if self.NUM_OVEN_SETS == 2 and oven2_clean_needed and oven2_free <= time:
                     return 2
+                return None
+            
+            def get_urgent_oven_not_free():
+                """Get an oven that urgently needs cleaning but isn't free, or None"""
+                if oven1_clean_urgent and oven1_free > time:
+                    return (1, oven1_free)
+                if self.NUM_OVEN_SETS == 2 and oven2_clean_urgent and oven2_free > time:
+                    return (2, oven2_free)
                 return None
             
             # TEAM 1 WORK - Handles all forming and cleaning, cuts when idle
@@ -593,14 +640,18 @@ class ProductionSimulator:
                 # PRIORITY 1: Form cleaning if 24+ hours since last clean AND form area is free
                 if form_clean_needed and form_area_free <= time:
                     team1_free = do_form_clean(1, time)
-                # PRIORITY 2: Oven cleaning if 24+ hours AND any oven is free
-                elif oven_clean_needed and any_oven_free():
-                    team1_free = do_oven_clean(1, time)
-                # PRIORITY 3: If oven cleaning is URGENT (22+ hrs) and no oven free
-                elif oven_clean_urgent and not any_oven_free():
+                # PRIORITY 2: Oven cleaning if 24+ hours AND that specific oven is free
+                elif get_free_oven_needing_clean() is not None:
+                    oven_to_clean = get_free_oven_needing_clean()
+                    if oven_to_clean == 1:
+                        team1_free = do_oven1_clean(1, time)
+                    else:
+                        team1_free = do_oven2_clean(1, time)
+                # PRIORITY 3: If any oven cleaning is URGENT (22+ hrs) and that oven not free
+                elif get_urgent_oven_not_free() is not None:
+                    urgent_oven, urgent_oven_free = get_urgent_oven_not_free()
                     # Can we cut while waiting? (only if wait > 1 hour)
-                    best_oven, best_oven_free = get_best_oven()
-                    wait_time = best_oven_free - time
+                    wait_time = urgent_oven_free - time
                     ready = ready_to_cut(being_cut, 1)
                     if wait_time > 1.0 and ready:
                         # Cut while waiting for oven
@@ -616,10 +667,10 @@ class ProductionSimulator:
                             cut(b, work, 1, is_partial=is_partial)
                             team1_free = time + work
                         else:
-                            team1_free = best_oven_free
+                            team1_free = urgent_oven_free
                     else:
                         # Wait for oven (short wait or nothing to cut)
-                        team1_free = best_oven_free
+                        team1_free = urgent_oven_free
                 else:
                     # Check what we can do
                     ready = ready_to_cut(being_cut, 1)
