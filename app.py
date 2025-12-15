@@ -947,6 +947,9 @@ def test_strategies():
     strategies = ['ratio', 'ratio_batches', 'wb_first', 'bb_first', 'adaptive', 
                   'cure_aware', 'goal_focused', 'wb_until_done', 'balanced_goal']
     
+    # Strategies to exclude from auto-recommendation (cause long wait times)
+    excluded_from_recommendation = {'wb_first', 'bb_first'}
+    
     results = []
     wb_target = config.get('wb_target', 1500000)
     bb_target = config.get('bb_target', 2500000)
@@ -990,16 +993,28 @@ def test_strategies():
             'wb_distance': wb_distance,
             'bb_distance': bb_distance,
             'both_met': both_met,
-            'score': score
+            'score': score,
+            'excluded_from_auto': strategy in excluded_from_recommendation
         })
     
     # Sort by score (highest = closest to both targets)
     results.sort(key=lambda x: x['score'], reverse=True)
-    best = results[0]['strategy']
+    
+    # Find best strategy (excluding wb_first and bb_first)
+    best = None
+    for r in results:
+        if r['strategy'] not in excluded_from_recommendation:
+            best = r['strategy']
+            break
+    
+    # Fallback if somehow all are excluded
+    if best is None:
+        best = results[0]['strategy']
     
     return jsonify({
         'success': True,
-        'results': results,
+        'strategies': results,  # Full list for frontend
+        'results': results,     # Keep for backward compatibility
         'recommendation': best,
         'config': {
             'wb_target': wb_target,
