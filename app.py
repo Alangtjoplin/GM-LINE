@@ -553,7 +553,7 @@ class ProductionSimulator:
             form_clean_urgent = must_clean_form_urgently(time)
             oven_clean_urgent = must_clean_oven_urgently(time)
             
-            # TEAM 1 WORK
+            # TEAM 1 WORK - Handles all forming and cleaning
             if team1_free <= time:
                 # PRIORITY 1: Form cleaning if 24+ hours since last clean AND form area is free
                 if form_clean_needed and form_area_free <= time:
@@ -561,18 +561,33 @@ class ProductionSimulator:
                 # PRIORITY 2: Oven cleaning if 24+ hours AND oven is free
                 elif oven_clean_needed and oven1_free <= time:
                     team1_free = do_oven_clean(1, time)
-                # PRIORITY 3: If oven cleaning is URGENT (22+ hrs) and oven not free, WAIT for oven
+                # PRIORITY 3: If oven cleaning is URGENT (22+ hrs) and oven not free
                 elif oven_clean_urgent and oven1_free > time:
-                    # Don't start new work - wait for oven to be free so we can clean it
-                    team1_free = oven1_free  # Worker waits for oven
+                    # Can we cut while waiting? (only if wait > 1 hour)
+                    wait_time = oven1_free - time
+                    ready = ready_to_cut(being_cut, 1)
+                    if wait_time > 1.0 and ready:
+                        # Cut while waiting for oven
+                        b = ready[0]
+                        being_cut.add(b.id)
+                        if b.cut_by is None:
+                            b.cut_by = 1
+                        remaining = self.CUT_TIME - b.cut_progress
+                        work = min(wait_time, remaining)
+                        is_partial = (work < remaining)
+                        cut(b, work, 1, is_partial=is_partial)
+                        team1_free = time + work
+                    else:
+                        # Wait for oven (short wait or nothing to cut)
+                        team1_free = oven1_free
                 else:
                     # Check if there's work to do
                     ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
                     # Can only form if form area is free AND oven will be ready
                     can_form = (form_area_free <= time) and (oven1_free <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
                     
-                    if ready or can_form:
-                        # Do normal work
+                    if can_form:
+                        # Team 1 prioritizes forming
                         deadline1 = oven1_free - self.FORM_TIME
                         result = do_work(1, deadline1, is_team2=False)
                         if isinstance(result, tuple):
@@ -581,44 +596,66 @@ class ProductionSimulator:
                                 being_cut.add(result[1])
                         else:
                             team1_free = result
-                    # else: no work available, time will advance
+                    elif ready:
+                        # No forming available, Team 1 can cut
+                        b = ready[0]
+                        being_cut.add(b.id)
+                        if b.cut_by is None:
+                            b.cut_by = 1
+                        remaining = self.CUT_TIME - b.cut_progress
+                        # Limit cut time if we need to form soon
+                        deadline1 = oven1_free - self.FORM_TIME
+                        if deadline1 > time:
+                            work = min(deadline1 - time, remaining)
+                            is_partial = (work < remaining)
+                            cut(b, work, 1, is_partial=is_partial)
+                            team1_free = time + work
+                        else:
+                            cut(b, remaining, 1, is_partial=False)
+                            team1_free = time + remaining
+                    else:
+                        # No work available - find next event to wake up at
+                        next_events = [self.TOTAL_HOURS, form_area_free, oven1_free]
+                        for b in batches:
+                            if b.cure_end > time and b.cut_end is None:
+                                next_events.append(b.cure_end)
+                        team1_free = min(e for e in next_events if e > time)
             
-            # TEAM 2 WORK
+            # TEAM 2 WORK - Cutting only (no forming, no cleaning)
             if team2_enabled():
                 if not team2_on(time):
                     team2_free = next_team2_start(time)
                 elif team2_free <= time:
-                    # Form area is SHARED - Team 2 only cleans if Team 1 hasn't recently
-                    # AND form area is free (not being used or cleaned by Team 1)
-                    if form_clean_needed and form_area_free <= time:
-                        # 24+ hours since last clean and area is free - Team 2 can clean
-                        team2_free = do_form_clean(2, time)
-                    else:
-                        # Check if there's work to do
-                        ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
-                        oven_for_team2 = oven2_free if self.NUM_OVEN_SETS == 2 else oven1_free
-                        # Can only form if form area is free
-                        can_form = (form_area_free <= time) and (oven_for_team2 <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                    # Team 2 only cuts - no forming or cleaning
+                    ready = [b for b in batches if b.cure_end <= time and b.cut_end is None and b.id not in being_cut]
+                    
+                    if ready:
+                        b = ready[0]
+                        being_cut.add(b.id)
+                        if b.cut_by is None:
+                            b.cut_by = 2
+                        remaining = self.CUT_TIME - b.cut_progress
+                        shift_end = team2_shift_end(time)
                         
-                        if ready or can_form:
-                            # Do normal work
-                            if self.NUM_OVEN_SETS == 2:
-                                deadline2 = oven2_free - self.FORM_TIME
-                                oven_num = 2
+                        if shift_end != float('inf') and time + remaining > shift_end:
+                            # Partial cut until shift ends
+                            work = shift_end - time
+                            if work > 0:
+                                cut(b, work, 2, is_partial=True)
+                                team2_free = next_team2_start(shift_end)
                             else:
-                                deadline2 = oven1_free - self.FORM_TIME
-                                oven_num = 1
-                            shift_end = team2_shift_end(time)
-                            result = do_work(oven_num, deadline2, shift_end, is_team2=True)
-                            if isinstance(result, tuple):
-                                team2_free = result[0]
-                            else:
-                                team2_free = result
+                                team2_free = next_team2_start(time)
                         else:
-                            # No work available - Team 2 can clean form area if needed and free
-                            if form_clean_needed and form_area_free <= time:
-                                team2_free = do_form_clean(2, time)
-                            # Team 2 doesn't do oven cleaning (Team 1 handles it)
+                            cut(b, remaining, 2, is_partial=False)
+                            team2_free = time + remaining
+                    else:
+                        # No batches to cut - find next event to wake up at
+                        shift_end = team2_shift_end(time)
+                        next_events = [self.TOTAL_HOURS, shift_end]
+                        for b in batches:
+                            if b.cure_end > time and b.cut_end is None:
+                                next_events.append(b.cure_end)
+                        team2_free = min(e for e in next_events if e > time)
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME, form_area_free]
             if self.NUM_OVEN_SETS == 2:
