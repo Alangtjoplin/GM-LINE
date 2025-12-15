@@ -476,6 +476,8 @@ def test_strategies():
                   'cure_aware', 'goal_focused', 'wb_until_done', 'balanced_goal']
     
     results = []
+    wb_target = config.get('wb_target', 1500000)
+    bb_target = config.get('bb_target', 2500000)
     
     for strategy in strategies:
         test_config = {**config, 'priority_strategy': strategy}
@@ -484,21 +486,42 @@ def test_strategies():
         wb_pct = mc['avg_wb_pct']
         bb_pct = mc['avg_bb_pct']
         min_pct = min(wb_pct, bb_pct)
+        avg_total = mc['avg_total']
+        avg_wb = mc['avg_wb']
+        avg_bb = mc['avg_bb']
         
-        # Score: prioritize meeting both goals
-        score = min_pct + (wb_pct + bb_pct) / 10
+        # Score: How close are we to hitting BOTH targets?
+        # Perfect score = both at 100%, penalize being under OR over
+        # Use distance from 100% for each product
+        wb_distance = abs(100 - wb_pct)  # 0 = perfect, higher = worse
+        bb_distance = abs(100 - bb_pct)  # 0 = perfect, higher = worse
+        
+        # Combined score: lower distance = better
+        # We want to minimize total distance from targets
+        # Invert so higher score = better (for sorting)
+        # Max possible distance is ~200 (if both are 0% or 200%)
+        score = 200 - (wb_distance + bb_distance)
+        
+        # Bonus: if both targets are met (>=100%), add bonus points
+        both_met = wb_pct >= 100 and bb_pct >= 100
+        if both_met:
+            score += 50
         
         results.append({
             'strategy': strategy,
-            'avg_wb': mc['avg_wb'],
-            'avg_bb': mc['avg_bb'],
+            'avg_wb': avg_wb,
+            'avg_bb': avg_bb,
+            'avg_total': avg_total,
             'wb_pct': wb_pct,
             'bb_pct': bb_pct,
             'min_pct': min_pct,
+            'wb_distance': wb_distance,
+            'bb_distance': bb_distance,
+            'both_met': both_met,
             'score': score
         })
     
-    # Sort by score
+    # Sort by score (highest = closest to both targets)
     results.sort(key=lambda x: x['score'], reverse=True)
     best = results[0]['strategy']
     
@@ -507,8 +530,8 @@ def test_strategies():
         'results': results,
         'recommendation': best,
         'config': {
-            'wb_target': config.get('wb_target', 1500000),
-            'bb_target': config.get('bb_target', 2500000),
+            'wb_target': wb_target,
+            'bb_target': bb_target,
         }
     })
 
