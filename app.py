@@ -719,15 +719,18 @@ def analyze_bottleneck_with_whatif(config, result):
     """Analyze bottlenecks by testing what-if scenarios"""
     wb_pct = result['wb_pct']
     bb_pct = result['bb_pct']
-    current_total = result['total']
     
-    # If both targets met, no bottleneck
+    # Calculate current score (squared distance from 100% - lower is better)
+    current_score = (100 - wb_pct) ** 2 + (100 - bb_pct) ** 2
+    
+    # If both targets met (or very close), no bottleneck
     if wb_pct >= 100 and bb_pct >= 100:
         return {
             'status': 'targets_met',
             'message': 'All production targets have been met!',
             'whatif_results': [],
-            'suggestions': []
+            'suggestions': [],
+            'current_score': round(current_score, 1),
         }
     
     # Run what-if scenarios
@@ -743,13 +746,13 @@ def analyze_bottleneck_with_whatif(config, result):
     if current_ovens < 20:
         test_config = {**config, 'num_ovens': current_ovens + 1}
         test_result = ProductionSimulator(test_config).simulate()
-        gain = test_result['total'] - current_total
-        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        new_score = (100 - test_result['wb_pct']) ** 2 + (100 - test_result['bb_pct']) ** 2
+        score_improvement = current_score - new_score  # Positive = better
         whatif_results.append({
             'change': f'Add 1 oven ({current_ovens} → {current_ovens + 1})',
             'type': 'oven',
-            'gain': gain,
-            'gain_pct': round(gain_pct, 1),
+            'score_improvement': round(score_improvement, 1),
+            'new_score': round(new_score, 1),
             'new_wb_pct': round(test_result['wb_pct'], 1),
             'new_bb_pct': round(test_result['bb_pct'], 1),
             'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
@@ -764,8 +767,8 @@ def analyze_bottleneck_with_whatif(config, result):
         new_team = team_upgrades[current_team]
         test_config = {**config, 'team_config': new_team}
         test_result = ProductionSimulator(test_config).simulate()
-        gain = test_result['total'] - current_total
-        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        new_score = (100 - test_result['wb_pct']) ** 2 + (100 - test_result['bb_pct']) ** 2
+        score_improvement = current_score - new_score
         
         team_labels = {
             '2team_6-6': '2 Teams (6am-6pm)',
@@ -774,8 +777,8 @@ def analyze_bottleneck_with_whatif(config, result):
         whatif_results.append({
             'change': f'Upgrade to {team_labels.get(new_team, new_team)}',
             'type': 'team',
-            'gain': gain,
-            'gain_pct': round(gain_pct, 1),
+            'score_improvement': round(score_improvement, 1),
+            'new_score': round(new_score, 1),
             'new_wb_pct': round(test_result['wb_pct'], 1),
             'new_bb_pct': round(test_result['bb_pct'], 1),
             'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
@@ -785,13 +788,13 @@ def analyze_bottleneck_with_whatif(config, result):
     if current_wb_sheets < 10:
         test_config = {**config, 'wb_sheets': current_wb_sheets + 1}
         test_result = ProductionSimulator(test_config).simulate()
-        gain = test_result['total'] - current_total
-        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        new_score = (100 - test_result['wb_pct']) ** 2 + (100 - test_result['bb_pct']) ** 2
+        score_improvement = current_score - new_score
         whatif_results.append({
             'change': f'Add 1 WB sheet ({current_wb_sheets} → {current_wb_sheets + 1})',
             'type': 'wb_sheet',
-            'gain': gain,
-            'gain_pct': round(gain_pct, 1),
+            'score_improvement': round(score_improvement, 1),
+            'new_score': round(new_score, 1),
             'new_wb_pct': round(test_result['wb_pct'], 1),
             'new_bb_pct': round(test_result['bb_pct'], 1),
             'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
@@ -801,13 +804,13 @@ def analyze_bottleneck_with_whatif(config, result):
     if current_bb_sheets < 10:
         test_config = {**config, 'bb_sheets': current_bb_sheets + 1}
         test_result = ProductionSimulator(test_config).simulate()
-        gain = test_result['total'] - current_total
-        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        new_score = (100 - test_result['wb_pct']) ** 2 + (100 - test_result['bb_pct']) ** 2
+        score_improvement = current_score - new_score
         whatif_results.append({
             'change': f'Add 1 BB sheet ({current_bb_sheets} → {current_bb_sheets + 1})',
             'type': 'bb_sheet',
-            'gain': gain,
-            'gain_pct': round(gain_pct, 1),
+            'score_improvement': round(score_improvement, 1),
+            'new_score': round(new_score, 1),
             'new_wb_pct': round(test_result['wb_pct'], 1),
             'new_bb_pct': round(test_result['bb_pct'], 1),
             'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
@@ -817,20 +820,20 @@ def analyze_bottleneck_with_whatif(config, result):
     if config.get('cleaning_enabled', True):
         test_config = {**config, 'cleaning_enabled': False}
         test_result = ProductionSimulator(test_config).simulate()
-        gain = test_result['total'] - current_total
-        gain_pct = (gain / current_total * 100) if current_total > 0 else 0
+        new_score = (100 - test_result['wb_pct']) ** 2 + (100 - test_result['bb_pct']) ** 2
+        score_improvement = current_score - new_score
         whatif_results.append({
             'change': 'Disable daily cleaning',
             'type': 'cleaning',
-            'gain': gain,
-            'gain_pct': round(gain_pct, 1),
+            'score_improvement': round(score_improvement, 1),
+            'new_score': round(new_score, 1),
             'new_wb_pct': round(test_result['wb_pct'], 1),
             'new_bb_pct': round(test_result['bb_pct'], 1),
             'meets_targets': test_result['wb_pct'] >= 100 and test_result['bb_pct'] >= 100,
         })
     
-    # Sort by gain (highest first)
-    whatif_results.sort(key=lambda x: x['gain'], reverse=True)
+    # Sort by score improvement (highest first = best improvement)
+    whatif_results.sort(key=lambda x: x['score_improvement'], reverse=True)
     
     # Generate suggestions based on results
     suggestions = []
@@ -839,61 +842,61 @@ def analyze_bottleneck_with_whatif(config, result):
     if whatif_results:
         best = whatif_results[0]
         
-        if best['gain'] > 0:
+        if best['score_improvement'] > 0:
             # Determine primary bottleneck based on what helps most
             if best['type'] == 'oven':
                 primary_bottleneck = {
                     'type': 'oven',
-                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'severity': 'high' if best['score_improvement'] > 500 else 'medium',
                     'message': 'Oven capacity is limiting production',
-                    'detail': f'Adding 1 oven would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                    'detail': f'Adding 1 oven improves balance score by {best["score_improvement"]:.0f} points'
                 }
-                suggestions.append(f'Add 1 oven for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+                suggestions.append(f'Add 1 oven (score improves by {best["score_improvement"]:.0f})')
             elif best['type'] == 'team':
                 primary_bottleneck = {
                     'type': 'labor',
-                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'severity': 'high' if best['score_improvement'] > 500 else 'medium',
                     'message': 'Worker capacity is limiting production',
-                    'detail': f'Adding workers would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                    'detail': f'Adding workers improves balance score by {best["score_improvement"]:.0f} points'
                 }
-                suggestions.append(f'Upgrade team configuration for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+                suggestions.append(f'Upgrade team configuration (score improves by {best["score_improvement"]:.0f})')
             elif best['type'] == 'wb_sheet':
                 primary_bottleneck = {
                     'type': 'wb_sheets',
-                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'severity': 'high' if best['score_improvement'] > 500 else 'medium',
                     'message': 'WB sheet limit is constraining production',
-                    'detail': f'Adding 1 WB sheet would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                    'detail': f'Adding 1 WB sheet improves balance score by {best["score_improvement"]:.0f} points'
                 }
-                suggestions.append(f'Add 1 WB sheet for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+                suggestions.append(f'Add 1 WB sheet (score improves by {best["score_improvement"]:.0f})')
             elif best['type'] == 'bb_sheet':
                 primary_bottleneck = {
                     'type': 'bb_sheets',
-                    'severity': 'high' if best['gain_pct'] > 10 else 'medium',
+                    'severity': 'high' if best['score_improvement'] > 500 else 'medium',
                     'message': 'BB sheet limit is constraining production',
-                    'detail': f'Adding 1 BB sheet would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                    'detail': f'Adding 1 BB sheet improves balance score by {best["score_improvement"]:.0f} points'
                 }
-                suggestions.append(f'Add 1 BB sheet for +{best["gain"]:,} units ({best["gain_pct"]}% increase)')
+                suggestions.append(f'Add 1 BB sheet (score improves by {best["score_improvement"]:.0f})')
             elif best['type'] == 'cleaning':
                 primary_bottleneck = {
                     'type': 'cleaning',
                     'severity': 'low',
                     'message': 'Cleaning overhead is affecting production',
-                    'detail': f'Disabling cleaning would increase output by {best["gain"]:,} units ({best["gain_pct"]}%)'
+                    'detail': f'Cleaning costs {best["score_improvement"]:.0f} balance score points'
                 }
-                suggestions.append(f'Cleaning overhead costs {best["gain"]:,} units ({best["gain_pct"]}%)')
+                suggestions.append(f'Cleaning overhead costs {best["score_improvement"]:.0f} score points')
         
         # Add other helpful changes as suggestions
         for item in whatif_results[1:4]:  # Next 3 best options
-            if item['gain'] > 0:
-                suggestions.append(f'{item["change"]}: +{item["gain"]:,} units ({item["gain_pct"]}%)')
+            if item['score_improvement'] > 0:
+                suggestions.append(f'{item["change"]}: score improves by {item["score_improvement"]:.0f}')
         
         # Check if any single change meets targets
         meets_target = [w for w in whatif_results if w['meets_targets']]
         if meets_target:
             suggestions.insert(0, f"✓ '{meets_target[0]['change']}' would meet both targets!")
     
-    # If no gains found, suggest strategy change
-    if not whatif_results or all(w['gain'] <= 0 for w in whatif_results):
+    # If no improvements found, suggest strategy change
+    if not whatif_results or all(w['score_improvement'] <= 0 for w in whatif_results):
         suggestions.append('Try different priority strategies to optimize production balance')
         if wb_pct < bb_pct:
             suggestions.append('WB is lagging - try wb_first, cure_aware, or balanced_goal strategies')
@@ -905,8 +908,8 @@ def analyze_bottleneck_with_whatif(config, result):
         'primary': primary_bottleneck,
         'whatif_results': whatif_results,
         'suggestions': suggestions[:5],
+        'current_score': round(current_score, 1),
         'current_production': {
-            'total': current_total,
             'wb_pct': round(wb_pct, 1),
             'bb_pct': round(bb_pct, 1),
         }
@@ -1309,6 +1312,38 @@ def gantt_image():
             y_labels = [r[0] for r in rows]
             y_positions = list(range(len(rows) - 1, -1, -1))
             
+            # Draw cleaning events first (so they appear behind batches)
+            cleaning_events = getattr(sim, 'cleaning_events', [])
+            for event in cleaning_events:
+                if event['start'] >= end_hour or event['end'] <= start_hour:
+                    continue
+                
+                team = event.get('team', 1)
+                event_type = event.get('type', '')
+                
+                for i, (label, team_num) in enumerate(rows):
+                    if team_num == team:
+                        y = y_positions[i]
+                        s = max(event['start'], start_hour)
+                        e = min(event['end'], end_hour)
+                        
+                        if event_type == 'form_clean':
+                            color = '#FFB6C1'  # Light pink
+                            edge_color = '#DC143C'
+                            ax.barh(y, e - s, left=s, height=0.7, color=color, 
+                                   edgecolor=edge_color, linewidth=1, hatch='\\\\', alpha=0.8)
+                            if e - s > 2:
+                                ax.text((s + e) / 2, y, 'FORM\nCLEAN', ha='center', va='center', 
+                                       fontsize=6, fontweight='bold', color=edge_color)
+                        elif event_type == 'oven_clean':
+                            color = '#DDA0DD'  # Plum
+                            edge_color = '#8B008B'
+                            ax.barh(y, e - s, left=s, height=0.7, color=color,
+                                   edgecolor=edge_color, linewidth=1, hatch='\\\\', alpha=0.8)
+                            if e - s > 2:
+                                ax.text((s + e) / 2, y, 'OVEN\nCLEAN', ha='center', va='center',
+                                       fontsize=6, fontweight='bold', color=edge_color)
+            
             for b in relevant_batches:
                 product = b.product
                 
@@ -1379,8 +1414,10 @@ def gantt_image():
                 mpatches.Patch(color=colors['cut_wb'], label='Cut WB'),
                 mpatches.Patch(color=colors['cut_bb'], label='Cut BB'),
                 mpatches.Patch(facecolor=colors['cut_wb'], hatch='///', label='Paused Cut'),
+                mpatches.Patch(facecolor='#FFB6C1', edgecolor='#DC143C', hatch='\\\\', label='Form Clean'),
+                mpatches.Patch(facecolor='#DDA0DD', edgecolor='#8B008B', hatch='\\\\', label='Oven Clean'),
             ]
-            ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
             ax.grid(axis='x', alpha=0.3)
         
         plt.tight_layout()
