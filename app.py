@@ -193,40 +193,52 @@ class ProductionSimulator:
         oven1_free = 0.0
         oven2_free = 0.0
         
-        # Daily cleaning tracking
-        last_form_clean_day_team1 = -1
-        last_form_clean_day_team2 = -1
-        last_oven_clean_day = -1
+        # Daily cleaning tracking - track actual time of last clean
+        last_form_clean_time_team1 = -24.0  # Start needing clean
+        last_form_clean_time_team2 = -24.0
+        last_oven_clean_time = -24.0
         
         # Cleaning events for Gantt chart
         cleaning_events = []
         
-        def get_current_day(t):
-            return int(t // 24)
+        def hours_since_form_clean(team_num, t):
+            if team_num == 1:
+                return t - last_form_clean_time_team1
+            else:
+                return t - last_form_clean_time_team2
+        
+        def hours_since_oven_clean(t):
+            return t - last_oven_clean_time
         
         def needs_form_clean(team_num, t):
             if not self.CLEANING_ENABLED:
                 return False
-            current_day = get_current_day(t)
-            if team_num == 1:
-                return current_day > last_form_clean_day_team1
-            else:
-                return current_day > last_form_clean_day_team2
+            return hours_since_form_clean(team_num, t) >= 24.0
         
         def needs_oven_clean(t):
             if not self.CLEANING_ENABLED:
                 return False
-            current_day = get_current_day(t)
-            return current_day > last_oven_clean_day
+            return hours_since_oven_clean(t) >= 24.0
+        
+        def must_clean_form_urgently(team_num, t):
+            """Returns True if it's been 22+ hours - getting urgent"""
+            if not self.CLEANING_ENABLED:
+                return False
+            return hours_since_form_clean(team_num, t) >= 22.0
+        
+        def must_clean_oven_urgently(t):
+            """Returns True if it's been 22+ hours - getting urgent"""
+            if not self.CLEANING_ENABLED:
+                return False
+            return hours_since_oven_clean(t) >= 22.0
         
         def do_form_clean(team_num, t):
-            nonlocal last_form_clean_day_team1, last_form_clean_day_team2
+            nonlocal last_form_clean_time_team1, last_form_clean_time_team2
             clean_end = t + self.FORM_CLEAN_TIME
-            current_day = get_current_day(t)
             if team_num == 1:
-                last_form_clean_day_team1 = current_day
+                last_form_clean_time_team1 = t
             else:
-                last_form_clean_day_team2 = current_day
+                last_form_clean_time_team2 = t
             if self.collect_gantt_data:
                 cleaning_events.append({
                     'type': 'form_clean',
@@ -237,11 +249,10 @@ class ProductionSimulator:
             return clean_end
         
         def do_oven_clean(team_num, t):
-            nonlocal last_oven_clean_day, oven1_free, oven2_free
+            nonlocal last_oven_clean_time, oven1_free, oven2_free
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
-            current_day = get_current_day(t)
-            last_oven_clean_day = current_day
+            last_oven_clean_time = t
             oven1_free = clean_end
             if self.NUM_OVEN_SETS == 2:
                 oven2_free = clean_end
@@ -503,8 +514,6 @@ class ProductionSimulator:
         
         # Main simulation loop
         while time < self.TOTAL_HOURS:
-            current_day = get_current_day(time)
-            
             batches = [b for b in batches if b.cut_end is None or b.cut_end > time]
             sheets_claimed_wb = 0
             sheets_claimed_bb = 0
@@ -517,35 +526,23 @@ class ProductionSimulator:
                         if last_session[1] > time:
                             being_cut.add(b.id)
             
-            # Calculate hours until end of day (cleaning deadline)
-            end_of_day = (current_day + 1) * 24
-            hours_left_today = end_of_day - time
-            
-            # Check cleaning needs
+            # Check cleaning needs (time-based: 24+ hours since last clean)
             form_clean_needed_t1 = needs_form_clean(1, time)
             oven_clean_needed = needs_oven_clean(time)
-            
-            # Estimate time needed for remaining cleaning
-            time_for_form_clean = self.FORM_CLEAN_TIME if form_clean_needed_t1 else 0
-            time_for_oven_clean = self.OVEN_CLEAN_MAX if oven_clean_needed else 0
-            total_clean_time_needed = time_for_form_clean + time_for_oven_clean
+            form_clean_urgent_t1 = must_clean_form_urgently(1, time)
+            oven_clean_urgent = must_clean_oven_urgently(time)
             
             # TEAM 1 WORK
             if team1_free <= time:
-                # Determine if we must prioritize cleaning
-                # Be aggressive: if less than 4 hours left or less than cleaning time + buffer
-                must_clean_soon = hours_left_today <= max(total_clean_time_needed + 2.0, 4.0)
-                
-                # PRIORITY 1: Form cleaning if running out of time
-                if form_clean_needed_t1 and must_clean_soon:
+                # PRIORITY 1: Form cleaning if 24+ hours since last clean
+                if form_clean_needed_t1:
                     team1_free = do_form_clean(1, time)
-                # PRIORITY 2: Oven cleaning - if oven is free, clean it
+                # PRIORITY 2: Oven cleaning if 24+ hours AND oven is free
                 elif oven_clean_needed and oven1_free <= time:
                     team1_free = do_oven_clean(1, time)
-                # PRIORITY 3: If oven cleaning needed and running out of time, WAIT for oven
-                elif oven_clean_needed and must_clean_soon and oven1_free > time:
+                # PRIORITY 3: If oven cleaning is URGENT (22+ hrs) and oven not free, WAIT for oven
+                elif oven_clean_urgent and oven1_free > time:
                     # Don't start new work - wait for oven to be free so we can clean it
-                    # The time will advance to when oven is free
                     team1_free = oven1_free  # Worker waits for oven
                 else:
                     # Check if there's work to do
@@ -562,13 +559,7 @@ class ProductionSimulator:
                                 being_cut.add(result[1])
                         else:
                             team1_free = result
-                    else:
-                        # No work available - use downtime for cleaning
-                        if form_clean_needed_t1:
-                            team1_free = do_form_clean(1, time)
-                        elif oven_clean_needed and oven1_free <= time:
-                            team1_free = do_oven_clean(1, time)
-                        # else: no work and no cleaning needed, time will advance
+                    # else: no work available, time will advance
             
             # TEAM 2 WORK
             if team2_enabled():
@@ -576,11 +567,9 @@ class ProductionSimulator:
                     team2_free = next_team2_start(time)
                 elif team2_free <= time:
                     form_clean_needed_t2 = needs_form_clean(2, time)
-                    time_for_form_clean_t2 = self.FORM_CLEAN_TIME if form_clean_needed_t2 else 0
-                    must_clean_now_t2 = hours_left_today <= time_for_form_clean_t2 + 1.0
                     
-                    if must_clean_now_t2 and form_clean_needed_t2:
-                        # Must clean now
+                    if form_clean_needed_t2:
+                        # 24+ hours since last clean - do it now
                         team2_free = do_form_clean(2, time)
                     else:
                         # Check if there's work to do
@@ -609,10 +598,6 @@ class ProductionSimulator:
                             # Team 2 doesn't do oven cleaning (Team 1 handles it)
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME]
-            # Add next day start time for cleaning check
-            next_day_start = (current_day + 1) * 24
-            if next_day_start < self.TOTAL_HOURS:
-                events.append(next_day_start)
             if self.NUM_OVEN_SETS == 2:
                 events.extend([oven2_free, oven2_free - self.FORM_TIME])
             if team2_enabled():
