@@ -329,12 +329,13 @@ class ProductionSimulator:
             def sort_key(b):
                 # Highest priority: BB that's already in progress (must finish on BB machine)
                 if b.product == 'BB' and b.cut_progress > 0:
-                    return (0, b.cure_end)
+                    return (0, -b.cut_progress, b.cure_end)  # More progress = higher priority
                 # Second priority: Any batch already in progress (continue what we started)
+                # Prefer the one with MORE progress (closer to being done)
                 if b.cut_progress > 0:
-                    return (1, b.cure_end)
+                    return (1, -b.cut_progress, b.cure_end)
                 # Default: oldest batch first (FIFO)
-                return (2, b.cure_end)
+                return (2, 0, b.cure_end)
             return sorted(ready, key=sort_key)
         
         def get_priority():
@@ -1308,6 +1309,10 @@ def gantt_image():
                 
                 # Cut
                 if b.cut_sessions:
+                    # Check if this batch has multiple sessions total (was paused/resumed)
+                    total_sessions = len(b.cut_sessions)
+                    is_paused_batch = total_sessions > 1
+                    
                     for i, (label, stage, team_filter) in enumerate(rows):
                         if stage == 'cut':
                             y = y_positions[i]
@@ -1328,13 +1333,15 @@ def gantt_image():
                             if not merged:
                                 continue
                             
-                            is_paused = len(merged) > 1
                             color = colors['cut_wb'] if product == 'WB' else colors['cut_bb']
                             
-                            for sess in merged:
+                            for j, sess in enumerate(merged):
                                 s = max(sess[0], start_hour)
                                 e = min(sess[1], end_hour)
-                                if is_paused:
+                                # Show as paused if: batch has multiple sessions AND this isn't the final session
+                                is_final_session = (j == len(merged) - 1) and (sess[1] >= b.cut_end - 0.01 if b.cut_end else False)
+                                show_paused = is_paused_batch and not is_final_session
+                                if show_paused:
                                     ax.barh(y, e - s, left=s, height=0.6, color=color, edgecolor='black', 
                                            linewidth=0.5, hatch='///', alpha=0.8)
                                 else:
@@ -1476,6 +1483,10 @@ def gantt_image():
                 
                 # Cut
                 if b.cut_sessions:
+                    # Check if this batch has multiple sessions total (was paused/resumed)
+                    total_sessions = len(b.cut_sessions)
+                    is_paused_batch = total_sessions > 1
+                    
                     for i, (label, team_num) in enumerate(rows):
                         y = y_positions[i]
                         
@@ -1496,13 +1507,15 @@ def gantt_image():
                         if not merged:
                             continue
                         
-                        is_paused = len(merged) > 1
                         color = colors['cut_wb'] if product == 'WB' else colors['cut_bb']
                         
-                        for sess in merged:
+                        for j, sess in enumerate(merged):
                             s = max(sess[0], start_hour)
                             e = min(sess[1], end_hour)
-                            if is_paused:
+                            # Show as paused if: batch has multiple sessions AND this isn't the final session
+                            is_final_session = (j == len(merged) - 1) and (sess[1] >= b.cut_end - 0.01 if b.cut_end else False)
+                            show_paused = is_paused_batch and not is_final_session
+                            if show_paused:
                                 ax.barh(y - 0.2, e - s, left=s, height=0.35, color=color, edgecolor='black',
                                        linewidth=0.5, hatch='///', alpha=0.8)
                             else:
