@@ -301,9 +301,14 @@ class ProductionSimulator:
             return len([b for b in batches if b.product == 'WB' 
                        and b.cure_end > time and b.cut_end is None])
         
-        def bb_cutting_machine_busy():
+        def bb_cutting_machine_busy(exclude_set):
             """Check if BB cutting machine is in use (including paused BB cuts)
             Returns the batch if there's a paused BB, or True if actively cutting, or False if free"""
+            # First check if any BB is currently being cut in this iteration
+            for b in batches:
+                if b.product == 'BB' and b.id in exclude_set:
+                    return b  # Being cut right now
+            # Then check for paused BB cuts
             for b in batches:
                 if b.product == 'BB' and b.cut_progress > 0 and b.cut_end is None:
                     # BB has started cutting but not finished
@@ -311,7 +316,7 @@ class ProductionSimulator:
             return None
         
         def ready_to_cut(exclude, team_num=None):
-            bb_in_progress = bb_cutting_machine_busy()
+            bb_in_progress = bb_cutting_machine_busy(exclude)
             ready = []
             for b in batches:
                 if b.cure_end <= time and b.cut_end is None and b.id not in exclude:
@@ -321,14 +326,13 @@ class ProductionSimulator:
                     ready.append(b)
             
             def sort_key(b):
-                # Highest priority: BB that's already in progress (machine is busy with it)
+                # Highest priority: BB that's already in progress (must finish on BB machine)
                 if b.product == 'BB' and b.cut_progress > 0:
-                    return (-1, b.cure_end)  # Highest priority
+                    return (0, b.cure_end)
+                # Second priority: Any batch already in progress (continue what we started)
                 if b.cut_progress > 0:
-                    if b.cut_by == team_num:
-                        return (0, b.cure_end)
-                    else:
-                        return (1, b.cure_end)
+                    return (1, b.cure_end)
+                # Default: oldest batch first (FIFO)
                 return (2, b.cure_end)
             return sorted(ready, key=sort_key)
         
@@ -590,16 +594,7 @@ class ProductionSimulator:
                     ready = ready_to_cut(being_cut, 1)
                     can_form = (form_area_free <= time) and (oven1_free <= time + self.FORM_TIME) and (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
                     
-                    # Priority: finish almost-done cuts first (< 1 hour remaining on own cuts)
-                    almost_done = [b for b in ready if (self.CUT_TIME - b.cut_progress) < 1.0 
-                                  and b.cut_progress > 0 and b.cut_by == 1]
-                    if almost_done:
-                        b = almost_done[0]
-                        being_cut.add(b.id)
-                        remaining = self.CUT_TIME - b.cut_progress
-                        cut(b, remaining, 1, is_partial=False)
-                        team1_free = time + remaining
-                    elif can_form:
+                    if can_form:
                         # Team 1 prioritizes forming
                         deadline1 = oven1_free - self.FORM_TIME
                         result = do_work(1, deadline1, is_team2=False)
@@ -616,18 +611,23 @@ class ProductionSimulator:
                         if b.cut_by is None:
                             b.cut_by = 1
                         remaining = self.CUT_TIME - b.cut_progress
-                        # Limit cut time if we need to form soon
+                        
+                        # Check if we need to form soon
                         deadline1 = oven1_free - self.FORM_TIME
-                        if deadline1 > time and form_area_free <= time:
-                            work = min(deadline1 - time, remaining)
-                            # Don't start a NEW cut if we'll have to stop in < 1 hour
-                            if work < 1.0 and b.cut_progress == 0:
+                        time_until_form = deadline1 - time if deadline1 > time else float('inf')
+                        
+                        if time_until_form < remaining and time_until_form > 0:
+                            # We'll need to stop for forming
+                            if time_until_form < 0.5 and b.cut_progress == 0:
+                                # Less than 30 min before forming and haven't started - just wait
+                                being_cut.discard(b.id)
                                 team1_free = deadline1
                             else:
-                                is_partial = (work < remaining)
-                                cut(b, work, 1, is_partial=is_partial)
-                                team1_free = time + work
+                                # Cut until we need to form
+                                cut(b, time_until_form, 1, is_partial=True)
+                                team1_free = time + time_until_form
                         else:
+                            # Full cut
                             cut(b, remaining, 1, is_partial=False)
                             team1_free = time + remaining
                     else:
@@ -648,26 +648,12 @@ class ProductionSimulator:
                     shift_end = team2_shift_end(time)
                     time_until_shift_end = shift_end - time if shift_end != float('inf') else float('inf')
                     
-                    # Priority: finish almost-done cuts first (< 1 hour remaining on own cuts)
-                    almost_done = [b for b in ready if (self.CUT_TIME - b.cut_progress) < 1.0 
-                                  and b.cut_progress > 0 and b.cut_by == 2]
-                    
-                    if almost_done:
-                        b = almost_done[0]
-                        being_cut.add(b.id)
-                        remaining = self.CUT_TIME - b.cut_progress
-                        if time_until_shift_end < remaining:
-                            cut(b, time_until_shift_end, 2, is_partial=True)
-                            team2_free = next_team2_start(shift_end)
-                        else:
-                            cut(b, remaining, 2, is_partial=False)
-                            team2_free = time + remaining
-                    elif ready:
+                    if ready:
                         b = ready[0]
                         remaining = self.CUT_TIME - b.cut_progress
                         
-                        # Don't start a NEW cut if shift ends in < 1 hour
-                        if time_until_shift_end < 1.0 and b.cut_progress == 0:
+                        # Don't start a NEW cut if shift ends in < 30 min
+                        if time_until_shift_end < 0.5 and b.cut_progress == 0:
                             team2_free = next_team2_start(shift_end)
                         elif time_until_shift_end < remaining:
                             # Partial cut until shift ends
