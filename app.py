@@ -106,6 +106,8 @@ class ProductionSimulator:
         self.TEAM2_START = config.get('team2_start', 6)
         self.TEAM2_END = config.get('team2_end', 18)
         
+        self.STOP_AT_TARGET = config.get('stop_at_target', False)
+        
         self.PRIORITY_STRATEGY = config.get('priority_strategy', 'ratio_batches')
         
         self.collect_gantt_data = collect_gantt_data
@@ -330,10 +332,18 @@ class ProductionSimulator:
             return t
         
         def active_wb():
-            return len([b for b in batches if b.product == 'WB' and (b.cut_end is None or b.cut_end > time)])
+            count = len([b for b in batches if b.product == 'WB' and (b.cut_end is None or b.cut_end > time)])
+            # If stop_at_target is enabled and WB target is hit, return max to block new WB
+            if self.STOP_AT_TARGET and total_wb >= self.WB_TARGET:
+                return self.WB_SHEETS  # Return max sheets to block forming new WB
+            return count
         
         def active_bb():
-            return len([b for b in batches if b.product == 'BB' and (b.cut_end is None or b.cut_end > time)])
+            count = len([b for b in batches if b.product == 'BB' and (b.cut_end is None or b.cut_end > time)])
+            # If stop_at_target is enabled and BB target is hit, return max to block new BB
+            if self.STOP_AT_TARGET and total_bb >= self.BB_TARGET:
+                return self.BB_SHEETS  # Return max sheets to block forming new BB
+            return count
         
         def curing_wb():
             return len([b for b in batches if b.product == 'WB' 
