@@ -652,26 +652,21 @@ class ProductionSimulator:
                 # PRIORITY 3: If any oven cleaning is URGENT (22+ hrs) and that oven not free
                 elif get_urgent_oven_not_free() is not None:
                     urgent_oven, urgent_oven_free = get_urgent_oven_not_free()
-                    # Can we cut while waiting? (only if wait > 1 hour)
                     wait_time = urgent_oven_free - time
                     ready = ready_to_cut(being_cut, 1)
-                    if wait_time > 1.0 and ready:
-                        # Cut while waiting for oven
+                    if ready:
+                        # Cut while waiting for oven (partial cut if needed)
                         b = ready[0]
+                        being_cut.add(b.id)
+                        if b.cut_by is None:
+                            b.cut_by = 1
                         remaining = self.CUT_TIME - b.cut_progress
-                        # Only start if we can make meaningful progress
-                        if remaining <= wait_time or b.cut_progress > 0:
-                            being_cut.add(b.id)
-                            if b.cut_by is None:
-                                b.cut_by = 1
-                            work = min(wait_time, remaining)
-                            is_partial = (work < remaining)
-                            cut(b, work, 1, is_partial=is_partial)
-                            team1_free = time + work
-                        else:
-                            team1_free = urgent_oven_free
+                        work = min(wait_time, remaining)
+                        is_partial = (work < remaining)
+                        cut(b, work, 1, is_partial=is_partial)
+                        team1_free = time + work
                     else:
-                        # Wait for oven (short wait or nothing to cut)
+                        # Nothing to cut - wait for oven
                         team1_free = urgent_oven_free
                 else:
                     # Check what we can do
