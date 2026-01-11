@@ -352,6 +352,7 @@ class ProductionSimulator:
         
         # Track break events for gantt
         break_events = []
+        last_recorded_break_day = -1
         
         def is_on_break(t):
             """Check if current time is during a break"""
@@ -370,7 +371,7 @@ class ProductionSimulator:
             return False
         
         def next_break_end(t):
-            """Get the end time of the current or next break"""
+            """Get the end time of the current break"""
             if not self.BREAKS_ENABLED:
                 return t
             h = t % 24
@@ -379,7 +380,7 @@ class ProductionSimulator:
             for break_start in sorted(self.BREAK_TIMES):
                 break_end = break_start + self.BREAK_DURATION
                 if break_end > 24:
-                    # Wrap around
+                    # Wrap around midnight
                     if h >= break_start:
                         return day_start + 24 + (break_end - 24)
                     elif h < (break_end - 24):
@@ -390,24 +391,28 @@ class ProductionSimulator:
             return t
         
         def next_break_start(t):
-            """Get the start time of the next break"""
-            if not self.BREAKS_ENABLED:
+            """Get the start time of the next break (not current one)"""
+            if not self.BREAKS_ENABLED or not self.BREAK_TIMES:
                 return float('inf')
             h = t % 24
             day_start = t - h
             
+            # Find next break that starts AFTER current time
             for break_start in sorted(self.BREAK_TIMES):
+                # If we're currently in this break, skip it
+                break_end = break_start + self.BREAK_DURATION
+                if break_end > 24:
+                    if h >= break_start or h < (break_end - 24):
+                        continue
+                else:
+                    if break_start <= h < break_end:
+                        continue
+                # This break starts after current time
                 if h < break_start:
                     return day_start + break_start
-            # Next break is tomorrow
-            if self.BREAK_TIMES:
-                return day_start + 24 + min(self.BREAK_TIMES)
-            return float('inf')
-        
-        def time_until_break(t):
-            """Get time until next break starts"""
-            nbs = next_break_start(t)
-            return nbs - t if nbs != float('inf') else float('inf')
+            
+            # All breaks today have passed or we're in one, get first break tomorrow
+            return day_start + 24 + min(self.BREAK_TIMES)
         
         # Track expired batches
         expired_batches = []
@@ -427,6 +432,23 @@ class ProductionSimulator:
                             'expired_at': time,
                             'wait_time': wait_time
                         })
+        
+        def get_urgent_batch(exclude):
+            """Get a batch that's about to expire (needs cutting urgently)"""
+            if not self.MAX_WAIT_ENABLED:
+                return None
+            urgent_threshold = self.MAX_WAIT_TO_CUT * 0.75  # 75% of max wait = urgent
+            for b in batches:
+                if b.cure_end <= time and b.cut_end is None and b.id not in exclude:
+                    wait_time = time - b.cure_end
+                    if wait_time >= urgent_threshold:
+                        # Check BB constraint
+                        if b.product == 'BB':
+                            bb_in_progress = bb_cutting_machine_busy(exclude)
+                            if bb_in_progress is not None and bb_in_progress != b:
+                                continue  # Can't cut this BB, machine busy
+                        return b
+            return None
         
         def team2_enabled():
             return self.TEAM_CONFIG != '1team'
@@ -729,17 +751,53 @@ class ProductionSimulator:
             if on_break:
                 # Skip to end of break
                 break_end = next_break_end(time)
-                if self.collect_gantt_data and (not break_events or break_events[-1]['end'] != break_end):
-                    # Record break event if not already recorded
-                    break_start_time = break_end - self.BREAK_DURATION
-                    if break_start_time < 0:
-                        break_start_time = 0
-                    if not break_events or break_events[-1]['start'] != break_start_time:
-                        break_events.append({
-                            'type': 'break',
-                            'start': break_start_time if break_start_time >= time - self.BREAK_DURATION else time,
-                            'end': break_end
-                        })
+                current_day = int(time // 24)
+                h = time % 24
+                # Find which break we're in
+                for break_start in self.BREAK_TIMES:
+                    break_end_hour = break_start + self.BREAK_DURATION
+                    if break_end_hour > 24:
+                        if h >= break_start or h < (break_end_hour - 24):
+                            break_key = (current_day, break_start)
+                            break
+                    else:
+                        if break_start <= h < break_end_hour:
+                            break_key = (current_day, break_start)
+                            break
+                else:
+                    break_key = (current_day, h)
+                
+                # Record break event if not already recorded for this day/time
+                if self.collect_gantt_data:
+                    already_recorded = any(
+                        abs(e['start'] - (current_day * 24 + break_start)) < 0.1 
+                        for e in break_events 
+                        for break_start in self.BREAK_TIMES
+                        if abs(e['start'] - (current_day * 24 + break_start)) < 0.1
+                    )
+                    if not already_recorded:
+                        for break_start in self.BREAK_TIMES:
+                            break_end_hour = break_start + self.BREAK_DURATION
+                            if break_end_hour > 24:
+                                if h >= break_start or h < (break_end_hour - 24):
+                                    actual_start = current_day * 24 + break_start
+                                    if h < break_start:  # We're past midnight
+                                        actual_start = (current_day - 1) * 24 + break_start
+                                    break_events.append({
+                                        'type': 'break',
+                                        'start': actual_start,
+                                        'end': actual_start + self.BREAK_DURATION
+                                    })
+                                    break
+                            else:
+                                if break_start <= h < break_end_hour:
+                                    break_events.append({
+                                        'type': 'break',
+                                        'start': current_day * 24 + break_start,
+                                        'end': current_day * 24 + break_end_hour
+                                    })
+                                    break
+                
                 time = break_end
                 team1_free = max(team1_free, break_end)
                 team2_free = max(team2_free, break_end)
@@ -800,8 +858,18 @@ class ProductionSimulator:
             
             # TEAM 1 WORK - Handles all forming and cleaning, cuts when idle
             if team1_free <= time:
+                # PRIORITY 0: Cut urgent batch (about to expire) if max wait enabled
+                urgent_batch = get_urgent_batch(being_cut)
+                if urgent_batch is not None:
+                    b = urgent_batch
+                    being_cut.add(b.id)
+                    if b.cut_by is None:
+                        b.cut_by = 1
+                    remaining = self.CUT_TIME - b.cut_progress
+                    cut(b, remaining, 1, is_partial=False)
+                    team1_free = time + remaining
                 # PRIORITY 1: Form cleaning if 24+ hours since last clean AND form area is free
-                if form_clean_needed and form_area_free <= time:
+                elif form_clean_needed and form_area_free <= time:
                     team1_free = do_form_clean(1, time)
                 # PRIORITY 2: Oven cleaning if 24+ hours AND that specific oven is free
                 elif get_free_oven_needing_clean() is not None:
@@ -945,8 +1013,18 @@ class ProductionSimulator:
                         # Full capability mode - Team 2 can form, clean, and cut
                         # Similar logic to Team 1 but uses oven 2 if available
                         
+                        # PRIORITY 0: Cut urgent batch (about to expire) if max wait enabled
+                        urgent_batch = get_urgent_batch(being_cut)
+                        if urgent_batch is not None:
+                            b = urgent_batch
+                            being_cut.add(b.id)
+                            if b.cut_by is None:
+                                b.cut_by = 2
+                            remaining = self.CUT_TIME - b.cut_progress
+                            cut(b, remaining, 2, is_partial=False)
+                            team2_free = time + remaining
                         # PRIORITY 1: Form cleaning if needed and form area is free
-                        if form_clean_needed and form_area_free <= time:
+                        elif form_clean_needed and form_area_free <= time:
                             team2_free = do_form_clean(2, time)
                         # PRIORITY 2: Oven 2 cleaning if needed and oven 2 is free
                         elif self.NUM_OVEN_SETS == 2 and needs_oven2_clean(time) and oven2_free <= time:
@@ -1055,18 +1133,15 @@ class ProductionSimulator:
                                 team2_free = min(e for e in next_events if e > time)
                     else:
                         # 2team_6-6 mode: Team 2 only cuts - no forming, no cleaning
-                        ready = ready_to_cut(being_cut, 2)
+                        # But still prioritize urgent batches
+                        urgent_batch = get_urgent_batch(being_cut)
                         shift_end = team2_shift_end(time)
                         time_until_shift_end = shift_end - time if shift_end != float('inf') else float('inf')
                         
-                        if ready:
-                            b = ready[0]
+                        if urgent_batch is not None:
+                            b = urgent_batch
                             remaining = self.CUT_TIME - b.cut_progress
-                            
-                            # Don't start a NEW cut if shift ends in < 30 min
-                            if time_until_shift_end < 0.5 and b.cut_progress == 0:
-                                team2_free = next_team2_start(shift_end)
-                            elif time_until_shift_end < remaining:
+                            if time_until_shift_end < remaining:
                                 # Partial cut until shift ends
                                 being_cut.add(b.id)
                                 if b.cut_by is None:
@@ -1080,12 +1155,35 @@ class ProductionSimulator:
                                 cut(b, remaining, 2, is_partial=False)
                                 team2_free = time + remaining
                         else:
-                            # No batches to cut - find next event to wake up at
-                            next_events = [self.TOTAL_HOURS, shift_end]
-                            for b in batches:
-                                if b.cure_end > time and b.cut_end is None:
-                                    next_events.append(b.cure_end)
-                            team2_free = min(e for e in next_events if e > time)
+                            ready = ready_to_cut(being_cut, 2)
+                            
+                            if ready:
+                                b = ready[0]
+                                remaining = self.CUT_TIME - b.cut_progress
+                                
+                                # Don't start a NEW cut if shift ends in < 30 min
+                                if time_until_shift_end < 0.5 and b.cut_progress == 0:
+                                    team2_free = next_team2_start(shift_end)
+                                elif time_until_shift_end < remaining:
+                                    # Partial cut until shift ends
+                                    being_cut.add(b.id)
+                                    if b.cut_by is None:
+                                        b.cut_by = 2
+                                    cut(b, time_until_shift_end, 2, is_partial=True)
+                                    team2_free = next_team2_start(shift_end)
+                                else:
+                                    being_cut.add(b.id)
+                                    if b.cut_by is None:
+                                        b.cut_by = 2
+                                    cut(b, remaining, 2, is_partial=False)
+                                    team2_free = time + remaining
+                            else:
+                                # No batches to cut - find next event to wake up at
+                                next_events = [self.TOTAL_HOURS, shift_end]
+                                for b in batches:
+                                    if b.cure_end > time and b.cut_end is None:
+                                        next_events.append(b.cure_end)
+                                team2_free = min(e for e in next_events if e > time)
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME, form_area_free]
             if self.NUM_OVEN_SETS == 2:
