@@ -268,6 +268,14 @@ class ProductionSimulator:
         
         def do_form_clean(team_num, t):
             nonlocal last_form_clean_time, form_area_free
+            
+            # Check if we have enough time before break
+            if self.BREAKS_ENABLED:
+                tub = time_until_break(t)
+                if tub < self.FORM_CLEAN_TIME:
+                    # Not enough time - return next break end
+                    return next_break_end(next_break_start(t))
+            
             clean_end = t + self.FORM_CLEAN_TIME
             last_form_clean_time = t
             form_area_free = clean_end  # Form area blocked during cleaning
@@ -282,6 +290,14 @@ class ProductionSimulator:
         
         def do_oven1_clean(team_num, t):
             nonlocal last_oven1_clean_time, oven1_free
+            
+            # Check if we have enough time before break
+            if self.BREAKS_ENABLED:
+                tub = time_until_break(t)
+                if tub < self._get_weighted_oven_clean_time():
+                    # Not enough time - return next break end
+                    return next_break_end(next_break_start(t))
+            
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
             last_oven1_clean_time = t
@@ -300,6 +316,14 @@ class ProductionSimulator:
             nonlocal last_oven2_clean_time, oven2_free
             if self.NUM_OVEN_SETS < 2:
                 return t  # No oven 2, return immediately
+            
+            # Check if we have enough time before break
+            if self.BREAKS_ENABLED:
+                tub = time_until_break(t)
+                if tub < self._get_weighted_oven_clean_time():
+                    # Not enough time - return next break end
+                    return next_break_end(next_break_start(t))
+            
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
             last_oven2_clean_time = t
@@ -413,6 +437,23 @@ class ProductionSimulator:
             
             # All breaks today have passed or we're in one, get first break tomorrow
             return day_start + 24 + min(self.BREAK_TIMES)
+        
+        def time_until_break(t):
+            """Get time until next break starts (0 if currently on break)"""
+            if not self.BREAKS_ENABLED or not self.BREAK_TIMES:
+                return float('inf')
+            if is_on_break(t):
+                return 0
+            return next_break_start(t) - t
+        
+        def limit_work_to_break(work_time):
+            """Limit work time to not exceed next break start"""
+            if not self.BREAKS_ENABLED:
+                return work_time
+            tub = time_until_break(time)
+            if tub <= 0:
+                return 0  # On break, can't work
+            return min(work_time, tub)
         
         # Track expired batches
         expired_batches = []
@@ -581,6 +622,14 @@ class ProductionSimulator:
         
         def form(product, oven_num, team_num):
             nonlocal batch_id, oven1_free, oven2_free, wb_batches_formed, bb_batches_formed, form_area_free
+            
+            # Check if we have enough time before break
+            if self.BREAKS_ENABLED:
+                tub = time_until_break(time)
+                if tub < self.FORM_TIME:
+                    # Not enough time to form before break - return next break end
+                    return next_break_end(next_break_start(time))
+            
             b = Batch(batch_id, product)
             batch_id += 1
             
@@ -625,6 +674,15 @@ class ProductionSimulator:
         def cut(batch, work_time, team_num, is_partial=False):
             nonlocal total_wb, total_bb
             
+            # Limit work time to next break if breaks enabled
+            actual_work_time = work_time
+            forced_partial = False
+            if self.BREAKS_ENABLED:
+                tub = time_until_break(time)
+                if tub > 0 and tub < work_time:
+                    actual_work_time = tub
+                    forced_partial = True
+            
             if batch.cut_start is None:
                 batch.cut_start = time
             
@@ -632,8 +690,8 @@ class ProductionSimulator:
                 batch.current_cut_session_start = time
                 batch.current_cut_team = team_num
             
-            batch.cut_progress += work_time
-            session_end = time + work_time
+            batch.cut_progress += actual_work_time
+            session_end = time + actual_work_time
             
             if batch.cut_progress >= self.CUT_TIME - 0.01:
                 batch.cut_end = session_end
@@ -644,10 +702,12 @@ class ProductionSimulator:
                 batch.cut_sessions.append((batch.current_cut_session_start, session_end, batch.current_cut_team))
                 batch.current_cut_session_start = None
                 batch.current_cut_team = None
-            elif is_partial:
+            elif is_partial or forced_partial:
                 batch.cut_sessions.append((batch.current_cut_session_start, session_end, batch.current_cut_team))
                 batch.current_cut_session_start = None
                 batch.current_cut_team = None
+            
+            return actual_work_time  # Return actual work done
         
         being_cut = set()
         sheets_claimed_wb = 0
@@ -858,16 +918,18 @@ class ProductionSimulator:
             
             # TEAM 1 WORK - Handles all forming and cleaning, cuts when idle
             if team1_free <= time:
+                # Check if on break first
+                if self.BREAKS_ENABLED and is_on_break(time):
+                    team1_free = next_break_end(time)
                 # PRIORITY 0: Cut urgent batch (about to expire) if max wait enabled
-                urgent_batch = get_urgent_batch(being_cut)
-                if urgent_batch is not None:
-                    b = urgent_batch
+                elif get_urgent_batch(being_cut) is not None:
+                    b = get_urgent_batch(being_cut)
                     being_cut.add(b.id)
                     if b.cut_by is None:
                         b.cut_by = 1
                     remaining = self.CUT_TIME - b.cut_progress
-                    cut(b, remaining, 1, is_partial=False)
-                    team1_free = time + remaining
+                    actual_work = cut(b, remaining, 1, is_partial=False)
+                    team1_free = time + actual_work
                 # PRIORITY 1: Form cleaning if 24+ hours since last clean AND form area is free
                 elif form_clean_needed and form_area_free <= time:
                     team1_free = do_form_clean(1, time)
@@ -891,9 +953,8 @@ class ProductionSimulator:
                             b.cut_by = 1
                         remaining = self.CUT_TIME - b.cut_progress
                         work = min(wait_time, remaining)
-                        is_partial = (work < remaining)
-                        cut(b, work, 1, is_partial=is_partial)
-                        team1_free = time + work
+                        actual_work = cut(b, work, 1, is_partial=(work < remaining))
+                        team1_free = time + actual_work
                     else:
                         # Nothing to cut - wait for oven
                         team1_free = urgent_oven_free
@@ -1013,16 +1074,18 @@ class ProductionSimulator:
                         # Full capability mode - Team 2 can form, clean, and cut
                         # Similar logic to Team 1 but uses oven 2 if available
                         
+                        # Check if on break first
+                        if self.BREAKS_ENABLED and is_on_break(time):
+                            team2_free = next_break_end(time)
                         # PRIORITY 0: Cut urgent batch (about to expire) if max wait enabled
-                        urgent_batch = get_urgent_batch(being_cut)
-                        if urgent_batch is not None:
-                            b = urgent_batch
+                        elif get_urgent_batch(being_cut) is not None:
+                            b = get_urgent_batch(being_cut)
                             being_cut.add(b.id)
                             if b.cut_by is None:
                                 b.cut_by = 2
                             remaining = self.CUT_TIME - b.cut_progress
-                            cut(b, remaining, 2, is_partial=False)
-                            team2_free = time + remaining
+                            actual_work = cut(b, remaining, 2, is_partial=False)
+                            team2_free = time + actual_work
                         # PRIORITY 1: Form cleaning if needed and form area is free
                         elif form_clean_needed and form_area_free <= time:
                             team2_free = do_form_clean(2, time)
@@ -1134,56 +1197,64 @@ class ProductionSimulator:
                     else:
                         # 2team_6-6 mode: Team 2 only cuts - no forming, no cleaning
                         # But still prioritize urgent batches
-                        urgent_batch = get_urgent_batch(being_cut)
-                        shift_end = team2_shift_end(time)
-                        time_until_shift_end = shift_end - time if shift_end != float('inf') else float('inf')
-                        
-                        if urgent_batch is not None:
-                            b = urgent_batch
-                            remaining = self.CUT_TIME - b.cut_progress
-                            if time_until_shift_end < remaining:
-                                # Partial cut until shift ends
-                                being_cut.add(b.id)
-                                if b.cut_by is None:
-                                    b.cut_by = 2
-                                cut(b, time_until_shift_end, 2, is_partial=True)
-                                team2_free = next_team2_start(shift_end)
-                            else:
-                                being_cut.add(b.id)
-                                if b.cut_by is None:
-                                    b.cut_by = 2
-                                cut(b, remaining, 2, is_partial=False)
-                                team2_free = time + remaining
+                        # Check if on break first
+                        if self.BREAKS_ENABLED and is_on_break(time):
+                            team2_free = next_break_end(time)
                         else:
-                            ready = ready_to_cut(being_cut, 2)
+                            urgent_batch = get_urgent_batch(being_cut)
+                            shift_end = team2_shift_end(time)
+                            time_until_shift_end = shift_end - time if shift_end != float('inf') else float('inf')
                             
-                            if ready:
-                                b = ready[0]
+                            if urgent_batch is not None:
+                                b = urgent_batch
                                 remaining = self.CUT_TIME - b.cut_progress
-                                
-                                # Don't start a NEW cut if shift ends in < 30 min
-                                if time_until_shift_end < 0.5 and b.cut_progress == 0:
-                                    team2_free = next_team2_start(shift_end)
-                                elif time_until_shift_end < remaining:
+                                if time_until_shift_end < remaining:
                                     # Partial cut until shift ends
                                     being_cut.add(b.id)
                                     if b.cut_by is None:
                                         b.cut_by = 2
-                                    cut(b, time_until_shift_end, 2, is_partial=True)
-                                    team2_free = next_team2_start(shift_end)
+                                    actual_work = cut(b, time_until_shift_end, 2, is_partial=True)
+                                    team2_free = time + actual_work
+                                    if actual_work >= time_until_shift_end:
+                                        team2_free = next_team2_start(shift_end)
                                 else:
                                     being_cut.add(b.id)
                                     if b.cut_by is None:
                                         b.cut_by = 2
-                                    cut(b, remaining, 2, is_partial=False)
-                                    team2_free = time + remaining
+                                    actual_work = cut(b, remaining, 2, is_partial=False)
+                                    team2_free = time + actual_work
                             else:
-                                # No batches to cut - find next event to wake up at
-                                next_events = [self.TOTAL_HOURS, shift_end]
-                                for b in batches:
-                                    if b.cure_end > time and b.cut_end is None:
-                                        next_events.append(b.cure_end)
-                                team2_free = min(e for e in next_events if e > time)
+                                ready = ready_to_cut(being_cut, 2)
+                                
+                                if ready:
+                                    b = ready[0]
+                                    remaining = self.CUT_TIME - b.cut_progress
+                                    
+                                    # Don't start a NEW cut if shift ends in < 30 min
+                                    if time_until_shift_end < 0.5 and b.cut_progress == 0:
+                                        team2_free = next_team2_start(shift_end)
+                                    elif time_until_shift_end < remaining:
+                                        # Partial cut until shift ends
+                                        being_cut.add(b.id)
+                                        if b.cut_by is None:
+                                            b.cut_by = 2
+                                        actual_work = cut(b, time_until_shift_end, 2, is_partial=True)
+                                        team2_free = time + actual_work
+                                        if actual_work >= time_until_shift_end:
+                                            team2_free = next_team2_start(shift_end)
+                                    else:
+                                        being_cut.add(b.id)
+                                        if b.cut_by is None:
+                                            b.cut_by = 2
+                                        actual_work = cut(b, remaining, 2, is_partial=False)
+                                        team2_free = time + actual_work
+                                else:
+                                    # No batches to cut - find next event to wake up at
+                                    next_events = [self.TOTAL_HOURS, shift_end]
+                                    for b in batches:
+                                        if b.cure_end > time and b.cut_end is None:
+                                            next_events.append(b.cure_end)
+                                    team2_free = min(e for e in next_events if e > time)
             
             events = [self.TOTAL_HOURS, team1_free, oven1_free, oven1_free - self.FORM_TIME, form_area_free]
             if self.NUM_OVEN_SETS == 2:
