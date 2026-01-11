@@ -107,6 +107,16 @@ class ProductionSimulator:
         self.TEAM2_END = config.get('team2_end', 18)
         
         self.STOP_AT_TARGET = config.get('stop_at_target', False)
+        self.AUTO_CLEAN_OVENS = config.get('auto_clean_ovens', False)
+        
+        # Worker breaks
+        self.BREAKS_ENABLED = config.get('breaks_enabled', False)
+        self.BREAK_TIMES = config.get('break_times', [12.0])  # Hours of day when breaks occur
+        self.BREAK_DURATION = config.get('break_duration', 0.5)  # Duration in hours
+        
+        # Max wait time to cut after curing
+        self.MAX_WAIT_ENABLED = config.get('max_wait_enabled', False)
+        self.MAX_WAIT_TO_CUT = config.get('max_wait_to_cut', 8.0)
         
         self.PRIORITY_STRATEGY = config.get('priority_strategy', 'ratio_batches')
         
@@ -303,6 +313,120 @@ class ProductionSimulator:
                     'end': clean_end
                 })
             return clean_end
+        
+        def check_auto_oven_clean():
+            """Auto clean ovens when they become free and need cleaning"""
+            nonlocal oven1_free, oven2_free, last_oven1_clean_time, last_oven2_clean_time
+            if not self.AUTO_CLEAN_OVENS or not self.CLEANING_ENABLED:
+                return
+            
+            # Check oven 1
+            if oven1_free <= time and needs_oven1_clean(time):
+                oven_clean_time = self._get_weighted_oven_clean_time()
+                clean_end = time + oven_clean_time
+                last_oven1_clean_time = time
+                oven1_free = clean_end
+                if self.collect_gantt_data:
+                    cleaning_events.append({
+                        'type': 'oven_clean',
+                        'team': 0,  # 0 = automatic
+                        'oven_set': 1,
+                        'start': time,
+                        'end': clean_end
+                    })
+            
+            # Check oven 2
+            if self.NUM_OVEN_SETS >= 2 and oven2_free <= time and needs_oven2_clean(time):
+                oven_clean_time = self._get_weighted_oven_clean_time()
+                clean_end = time + oven_clean_time
+                last_oven2_clean_time = time
+                oven2_free = clean_end
+                if self.collect_gantt_data:
+                    cleaning_events.append({
+                        'type': 'oven_clean',
+                        'team': 0,  # 0 = automatic
+                        'oven_set': 2,
+                        'start': time,
+                        'end': clean_end
+                    })
+        
+        # Track break events for gantt
+        break_events = []
+        
+        def is_on_break(t):
+            """Check if current time is during a break"""
+            if not self.BREAKS_ENABLED:
+                return False
+            h = t % 24
+            for break_start in self.BREAK_TIMES:
+                break_end = break_start + self.BREAK_DURATION
+                if break_end > 24:
+                    # Break wraps around midnight
+                    if h >= break_start or h < (break_end - 24):
+                        return True
+                else:
+                    if break_start <= h < break_end:
+                        return True
+            return False
+        
+        def next_break_end(t):
+            """Get the end time of the current or next break"""
+            if not self.BREAKS_ENABLED:
+                return t
+            h = t % 24
+            day_start = t - h
+            
+            for break_start in sorted(self.BREAK_TIMES):
+                break_end = break_start + self.BREAK_DURATION
+                if break_end > 24:
+                    # Wrap around
+                    if h >= break_start:
+                        return day_start + 24 + (break_end - 24)
+                    elif h < (break_end - 24):
+                        return day_start + (break_end - 24)
+                else:
+                    if break_start <= h < break_end:
+                        return day_start + break_end
+            return t
+        
+        def next_break_start(t):
+            """Get the start time of the next break"""
+            if not self.BREAKS_ENABLED:
+                return float('inf')
+            h = t % 24
+            day_start = t - h
+            
+            for break_start in sorted(self.BREAK_TIMES):
+                if h < break_start:
+                    return day_start + break_start
+            # Next break is tomorrow
+            if self.BREAK_TIMES:
+                return day_start + 24 + min(self.BREAK_TIMES)
+            return float('inf')
+        
+        def time_until_break(t):
+            """Get time until next break starts"""
+            nbs = next_break_start(t)
+            return nbs - t if nbs != float('inf') else float('inf')
+        
+        # Track expired batches
+        expired_batches = []
+        
+        def check_expired_batches():
+            """Check for batches that exceeded max wait time"""
+            if not self.MAX_WAIT_ENABLED:
+                return
+            for b in batches:
+                if b.cure_end <= time and b.cut_end is None:
+                    wait_time = time - b.cure_end
+                    if wait_time > self.MAX_WAIT_TO_CUT and b.id not in [e['id'] for e in expired_batches]:
+                        expired_batches.append({
+                            'id': b.id,
+                            'product': b.product,
+                            'cure_end': b.cure_end,
+                            'expired_at': time,
+                            'wait_time': wait_time
+                        })
         
         def team2_enabled():
             return self.TEAM_CONFIG != '1team'
@@ -594,6 +718,33 @@ class ProductionSimulator:
         
         # Main simulation loop
         while time < self.TOTAL_HOURS:
+            # Auto clean ovens if enabled
+            check_auto_oven_clean()
+            
+            # Check for expired batches
+            check_expired_batches()
+            
+            # Check if workers are on break
+            on_break = is_on_break(time)
+            if on_break:
+                # Skip to end of break
+                break_end = next_break_end(time)
+                if self.collect_gantt_data and (not break_events or break_events[-1]['end'] != break_end):
+                    # Record break event if not already recorded
+                    break_start_time = break_end - self.BREAK_DURATION
+                    if break_start_time < 0:
+                        break_start_time = 0
+                    if not break_events or break_events[-1]['start'] != break_start_time:
+                        break_events.append({
+                            'type': 'break',
+                            'start': break_start_time if break_start_time >= time - self.BREAK_DURATION else time,
+                            'end': break_end
+                        })
+                time = break_end
+                team1_free = max(team1_free, break_end)
+                team2_free = max(team2_free, break_end)
+                continue
+            
             batches = [b for b in batches if b.cut_end is None or b.cut_end > time]
             sheets_claimed_wb = 0
             sheets_claimed_bb = 0
@@ -608,13 +759,13 @@ class ProductionSimulator:
             
             # Check cleaning needs (time-based: 24+ hours since last clean)
             # Form area is SHARED - only one cleaning needed for both teams
-            # Ovens are cleaned INDEPENDENTLY
+            # Ovens are cleaned INDEPENDENTLY (or automatically if AUTO_CLEAN_OVENS)
             form_clean_needed = needs_form_clean(time)
-            oven1_clean_needed = needs_oven1_clean(time)
-            oven2_clean_needed = needs_oven2_clean(time)  # Returns False if only 1 oven set
+            oven1_clean_needed = needs_oven1_clean(time) and not self.AUTO_CLEAN_OVENS
+            oven2_clean_needed = needs_oven2_clean(time) and not self.AUTO_CLEAN_OVENS
             form_clean_urgent = must_clean_form_urgently(time)
-            oven1_clean_urgent = must_clean_oven1_urgently(time)
-            oven2_clean_urgent = must_clean_oven2_urgently(time)  # Returns False if only 1 oven set
+            oven1_clean_urgent = must_clean_oven1_urgently(time) and not self.AUTO_CLEAN_OVENS
+            oven2_clean_urgent = must_clean_oven2_urgently(time) and not self.AUTO_CLEAN_OVENS
             
             def get_best_oven():
                 """Returns (oven_num, oven_free_time) for the oven that will be free soonest"""
@@ -947,12 +1098,18 @@ class ProductionSimulator:
                 if b.cure_end > time and b.cut_end is None:
                     events.append(b.cure_end)
             
+            # Add next break start to events
+            if self.BREAKS_ENABLED:
+                events.append(next_break_start(time))
+            
             next_t = min(e for e in events if e > time)
             time = next_t if next_t > time else time + 0.1
         
         if self.collect_gantt_data:
             self.all_batches = all_batches
             self.cleaning_events = cleaning_events
+            self.break_events = break_events
+            self.expired_batches = expired_batches
         
         wb_pct = 100 * total_wb / self.WB_TARGET if self.WB_TARGET > 0 else 0
         bb_pct = 100 * total_bb / self.BB_TARGET if self.BB_TARGET > 0 else 0
@@ -964,7 +1121,8 @@ class ProductionSimulator:
             'wb_pct': wb_pct,
             'bb_pct': bb_pct,
             'wb_batches': wb_batches_formed,
-            'bb_batches': bb_batches_formed
+            'bb_batches': bb_batches_formed,
+            'expired_batches': len(expired_batches)
         }
 
 
