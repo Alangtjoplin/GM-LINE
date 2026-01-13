@@ -1166,6 +1166,7 @@ class ProductionSimulator:
                         # This avoids resource contention with Team 1
                         elif self.NUM_OVEN_SETS == 1:
                             # Team 2 only cuts when there's 1 oven set
+                            # First check if there are any batches ready to cut that Team 1 isn't cutting
                             ready = ready_to_cut(being_cut, 2)
                             if ready:
                                 b = ready[0]
@@ -1176,11 +1177,16 @@ class ProductionSimulator:
                                 actual_work = cut(b, remaining, 2, is_partial=False)
                                 team2_free = time + actual_work
                             else:
-                                # Nothing to cut - wait for next batch to be ready
+                                # Nothing to cut right now - check if Team 1 is cutting something
+                                # If so, wait until they finish or a new batch becomes ready
                                 next_events = [self.TOTAL_HOURS]
+                                # Wait for any batch to finish curing
                                 for b in batches:
                                     if b.cure_end > time and b.cut_end is None:
                                         next_events.append(b.cure_end)
+                                # Also wake up when Team 1 finishes their current task
+                                if team1_free > time:
+                                    next_events.append(team1_free)
                                 team2_free = min(e for e in next_events if e > time)
                         # PRIORITY 1: Form cleaning if needed and form area is free
                         elif form_clean_needed and form_area_free <= time:
@@ -1340,28 +1346,7 @@ class ProductionSimulator:
                             else:
                                 ready = ready_to_cut(being_cut, 2)
                                 
-                                # Decide whether to cut:
-                                # 1. There's a backlog (2+ batches ready), OR
-                                # 2. Team 1 is busy and can't cut right now, OR
-                                # 3. Cutting would unblock forming (sheets maxed out), OR
-                                # 4. There's a batch in progress that Team 2 started
-                                should_cut = False
                                 if ready:
-                                    b = ready[0]
-                                    if len(ready) >= 2:
-                                        # Backlog exists - help out
-                                        should_cut = True
-                                    elif team1_is_busy:
-                                        # Team 1 is forming/cleaning - we can cut
-                                        should_cut = True
-                                    elif cutting_would_unblock:
-                                        # Cutting this batch will free up a sheet for forming
-                                        should_cut = True
-                                    elif b.cut_progress > 0 and b.cut_by == 2:
-                                        # Finish what we started
-                                        should_cut = True
-                                
-                                if ready and should_cut:
                                     b = ready[0]
                                     remaining = self.CUT_TIME - b.cut_progress
                                     
@@ -1384,7 +1369,7 @@ class ProductionSimulator:
                                         actual_work = cut(b, remaining, 2, is_partial=False)
                                         team2_free = time + actual_work
                                 else:
-                                    # No batches to cut or not worth cutting - find next event to wake up at
+                                    # No batches to cut - find next event to wake up at
                                     next_events = [self.TOTAL_HOURS, shift_end]
                                     for b in batches:
                                         if b.cure_end > time and b.cut_end is None:
