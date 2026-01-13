@@ -1246,6 +1246,14 @@ class ProductionSimulator:
                             shift_end = team2_shift_end(time)
                             time_until_shift_end = shift_end - time if shift_end != float('inf') else float('inf')
                             
+                            # Check if Team 1 is currently busy (forming or cleaning)
+                            team1_is_busy = team1_free > time
+                            
+                            # Check if cutting would unblock forming (sheets are maxed out)
+                            wb_sheets_full = active_wb() >= self.WB_SHEETS
+                            bb_sheets_full = active_bb() >= self.BB_SHEETS
+                            cutting_would_unblock = wb_sheets_full or bb_sheets_full
+                            
                             if urgent_batch is not None:
                                 b = urgent_batch
                                 remaining = self.CUT_TIME - b.cut_progress
@@ -1267,7 +1275,28 @@ class ProductionSimulator:
                             else:
                                 ready = ready_to_cut(being_cut, 2)
                                 
+                                # Decide whether to cut:
+                                # 1. There's a backlog (2+ batches ready), OR
+                                # 2. Team 1 is busy and can't cut right now, OR
+                                # 3. Cutting would unblock forming (sheets maxed out), OR
+                                # 4. There's a batch in progress that Team 2 started
+                                should_cut = False
                                 if ready:
+                                    b = ready[0]
+                                    if len(ready) >= 2:
+                                        # Backlog exists - help out
+                                        should_cut = True
+                                    elif team1_is_busy:
+                                        # Team 1 is forming/cleaning - we can cut
+                                        should_cut = True
+                                    elif cutting_would_unblock:
+                                        # Cutting this batch will free up a sheet for forming
+                                        should_cut = True
+                                    elif b.cut_progress > 0 and b.cut_by == 2:
+                                        # Finish what we started
+                                        should_cut = True
+                                
+                                if ready and should_cut:
                                     b = ready[0]
                                     remaining = self.CUT_TIME - b.cut_progress
                                     
@@ -1290,7 +1319,7 @@ class ProductionSimulator:
                                         actual_work = cut(b, remaining, 2, is_partial=False)
                                         team2_free = time + actual_work
                                 else:
-                                    # No batches to cut - find next event to wake up at
+                                    # No batches to cut or not worth cutting - find next event to wake up at
                                     next_events = [self.TOTAL_HOURS, shift_end]
                                     for b in batches:
                                         if b.cure_end > time and b.cut_end is None:
