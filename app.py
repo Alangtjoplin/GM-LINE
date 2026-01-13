@@ -388,8 +388,9 @@ class ProductionSimulator:
             if not self.AUTO_CLEAN_OVENS or not self.CLEANING_ENABLED:
                 return
             
-            # Check oven 1
-            if oven1_free <= time and needs_oven1_clean(time):
+            # Check oven 1 - clean if it's free AND (24hrs passed OR will pass while oven was busy)
+            oven1_needs_clean = (time - last_oven1_clean_time) >= 24.0
+            if oven1_free <= time and oven1_needs_clean:
                 oven_clean_time = self._get_weighted_oven_clean_time()
                 clean_end = time + oven_clean_time
                 last_oven1_clean_time = time
@@ -404,19 +405,21 @@ class ProductionSimulator:
                     })
             
             # Check oven 2
-            if self.NUM_OVEN_SETS >= 2 and oven2_free <= time and needs_oven2_clean(time):
-                oven_clean_time = self._get_weighted_oven_clean_time()
-                clean_end = time + oven_clean_time
-                last_oven2_clean_time = time
-                oven2_free = clean_end
-                if self.collect_gantt_data:
-                    cleaning_events.append({
-                        'type': 'oven_clean',
-                        'team': 0,  # 0 = automatic
-                        'oven_set': 2,
-                        'start': time,
-                        'end': clean_end
-                    })
+            if self.NUM_OVEN_SETS >= 2:
+                oven2_needs_clean = (time - last_oven2_clean_time) >= 24.0
+                if oven2_free <= time and oven2_needs_clean:
+                    oven_clean_time = self._get_weighted_oven_clean_time()
+                    clean_end = time + oven_clean_time
+                    last_oven2_clean_time = time
+                    oven2_free = clean_end
+                    if self.collect_gantt_data:
+                        cleaning_events.append({
+                            'type': 'oven_clean',
+                            'team': 0,  # 0 = automatic
+                            'oven_set': 2,
+                            'start': time,
+                            'end': clean_end
+                        })
         
         # Track break events for gantt
         break_events = []
@@ -1390,6 +1393,18 @@ class ProductionSimulator:
             # Add next break start to events
             if self.BREAKS_ENABLED:
                 events.append(next_break_start(time))
+            
+            # Add next auto clean time to events (so we wake up when cleaning is due)
+            if self.AUTO_CLEAN_OVENS and self.CLEANING_ENABLED:
+                # When will oven 1 need cleaning?
+                next_oven1_clean = last_oven1_clean_time + 24.0
+                if next_oven1_clean > time:
+                    events.append(next_oven1_clean)
+                # When will oven 2 need cleaning?
+                if self.NUM_OVEN_SETS >= 2:
+                    next_oven2_clean = last_oven2_clean_time + 24.0
+                    if next_oven2_clean > time:
+                        events.append(next_oven2_clean)
             
             next_t = min(e for e in events if e > time)
             time = next_t if next_t > time else time + 0.1
