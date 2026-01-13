@@ -967,9 +967,11 @@ class ProductionSimulator:
                     
                     # Can form if:
                     # 1. Form area is free
-                    # 2. Sheets available  
+                    # 2. Sheets available (and target not hit for that product if stop_at_target enabled)
                     # 3. Best oven will be free by the time forming finishes
-                    sheets_available = (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                    wb_can_form = active_wb() < self.WB_SHEETS
+                    bb_can_form = active_bb() < self.BB_SHEETS
+                    sheets_available = wb_can_form or bb_can_form
                     oven_ready_after_form = best_oven_free <= (time + self.FORM_TIME)
                     can_form = (form_area_free <= time) and sheets_available and oven_ready_after_form
                     
@@ -978,12 +980,21 @@ class ProductionSimulator:
                     
                     if can_form:
                         # Oven will be ready when forming finishes - form now!
+                        # Determine priority, but if one product's target is hit, prioritize the other
                         wb_priority = get_priority()
+                        
+                        # Override priority if one target is hit (stop_at_target)
+                        if self.STOP_AT_TARGET:
+                            if total_wb >= self.WB_TARGET and total_bb < self.BB_TARGET:
+                                wb_priority = False  # Force BB
+                            elif total_bb >= self.BB_TARGET and total_wb < self.WB_TARGET:
+                                wb_priority = True  # Force WB
+                        
                         if wb_priority:
-                            if active_wb() < self.WB_SHEETS:
+                            if wb_can_form:
                                 result = form('WB', best_oven, 1)
                                 team1_free = result
-                            elif active_bb() < self.BB_SHEETS:
+                            elif bb_can_form:
                                 result = form('BB', best_oven, 1)
                                 team1_free = result
                             else:
@@ -1005,10 +1016,10 @@ class ProductionSimulator:
                                             next_events.append(b.cure_end)
                                     team1_free = min(e for e in next_events if e > time)
                         else:
-                            if active_bb() < self.BB_SHEETS:
+                            if bb_can_form:
                                 result = form('BB', best_oven, 1)
                                 team1_free = result
-                            elif active_wb() < self.WB_SHEETS:
+                            elif wb_can_form:
                                 result = form('WB', best_oven, 1)
                                 team1_free = result
                             else:
@@ -1132,7 +1143,9 @@ class ProductionSimulator:
                                 t2_best_oven = 1
                                 t2_best_oven_free = oven1_free
                             
-                            sheets_available = (active_wb() < self.WB_SHEETS or active_bb() < self.BB_SHEETS)
+                            wb_can_form = active_wb() < self.WB_SHEETS
+                            bb_can_form = active_bb() < self.BB_SHEETS
+                            sheets_available = wb_can_form or bb_can_form
                             oven_ready_after_form = t2_best_oven_free <= (time + self.FORM_TIME)
                             can_form = (form_area_free <= time) and sheets_available and oven_ready_after_form
                             
@@ -1140,11 +1153,19 @@ class ProductionSimulator:
                             
                             if can_form:
                                 wb_priority = get_priority()
+                                
+                                # Override priority if one target is hit (stop_at_target)
+                                if self.STOP_AT_TARGET:
+                                    if total_wb >= self.WB_TARGET and total_bb < self.BB_TARGET:
+                                        wb_priority = False  # Force BB
+                                    elif total_bb >= self.BB_TARGET and total_wb < self.WB_TARGET:
+                                        wb_priority = True  # Force WB
+                                
                                 if wb_priority:
-                                    if active_wb() < self.WB_SHEETS:
+                                    if wb_can_form:
                                         result = form('WB', t2_best_oven, 2)
                                         team2_free = result
-                                    elif active_bb() < self.BB_SHEETS:
+                                    elif bb_can_form:
                                         result = form('BB', t2_best_oven, 2)
                                         team2_free = result
                                     else:
@@ -1164,10 +1185,10 @@ class ProductionSimulator:
                                                     next_events.append(b.cure_end)
                                             team2_free = min(e for e in next_events if e > time)
                                 else:
-                                    if active_bb() < self.BB_SHEETS:
+                                    if bb_can_form:
                                         result = form('BB', t2_best_oven, 2)
                                         team2_free = result
-                                    elif active_wb() < self.WB_SHEETS:
+                                    elif wb_can_form:
                                         result = form('WB', t2_best_oven, 2)
                                         team2_free = result
                                     else:
