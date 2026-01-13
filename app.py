@@ -269,14 +269,28 @@ class ProductionSimulator:
         def do_form_clean(team_num, t):
             nonlocal last_form_clean_time, form_area_free
             
-            # Check if we have enough time before break
-            if self.BREAKS_ENABLED:
-                tub = time_until_break(t)
-                if tub < self.FORM_CLEAN_TIME:
-                    # Not enough time - return next break end
-                    return next_break_end(next_break_start(t))
-            
+            # Calculate clean end time, accounting for any breaks during cleaning
             clean_end = t + self.FORM_CLEAN_TIME
+            if self.BREAKS_ENABLED:
+                check_time = t
+                total_break_time = 0
+                while check_time < clean_end + total_break_time:
+                    h = check_time % 24
+                    day_start = check_time - h
+                    found_break = False
+                    for break_start in sorted(self.BREAK_TIMES):
+                        break_abs_start = day_start + break_start
+                        if break_abs_start <= check_time:
+                            break_abs_start = day_start + 24 + break_start
+                        if break_abs_start < clean_end + total_break_time:
+                            total_break_time += self.BREAK_DURATION
+                            check_time = break_abs_start + self.BREAK_DURATION
+                            found_break = True
+                            break
+                    if not found_break:
+                        break
+                clean_end = t + self.FORM_CLEAN_TIME + total_break_time
+            
             last_form_clean_time = t
             form_area_free = clean_end  # Form area blocked during cleaning
             if self.collect_gantt_data:
@@ -291,15 +305,30 @@ class ProductionSimulator:
         def do_oven1_clean(team_num, t):
             nonlocal last_oven1_clean_time, oven1_free
             
-            # Check if we have enough time before break
-            if self.BREAKS_ENABLED:
-                tub = time_until_break(t)
-                if tub < self._get_weighted_oven_clean_time():
-                    # Not enough time - return next break end
-                    return next_break_end(next_break_start(t))
-            
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
+            
+            # Account for breaks during cleaning
+            if self.BREAKS_ENABLED:
+                check_time = t
+                total_break_time = 0
+                while check_time < clean_end + total_break_time:
+                    h = check_time % 24
+                    day_start = check_time - h
+                    found_break = False
+                    for break_start in sorted(self.BREAK_TIMES):
+                        break_abs_start = day_start + break_start
+                        if break_abs_start <= check_time:
+                            break_abs_start = day_start + 24 + break_start
+                        if break_abs_start < clean_end + total_break_time:
+                            total_break_time += self.BREAK_DURATION
+                            check_time = break_abs_start + self.BREAK_DURATION
+                            found_break = True
+                            break
+                    if not found_break:
+                        break
+                clean_end = t + oven_clean_time + total_break_time
+            
             last_oven1_clean_time = t
             oven1_free = clean_end
             if self.collect_gantt_data:
@@ -317,15 +346,30 @@ class ProductionSimulator:
             if self.NUM_OVEN_SETS < 2:
                 return t  # No oven 2, return immediately
             
-            # Check if we have enough time before break
-            if self.BREAKS_ENABLED:
-                tub = time_until_break(t)
-                if tub < self._get_weighted_oven_clean_time():
-                    # Not enough time - return next break end
-                    return next_break_end(next_break_start(t))
-            
             oven_clean_time = self._get_weighted_oven_clean_time()
             clean_end = t + oven_clean_time
+            
+            # Account for breaks during cleaning
+            if self.BREAKS_ENABLED:
+                check_time = t
+                total_break_time = 0
+                while check_time < clean_end + total_break_time:
+                    h = check_time % 24
+                    day_start = check_time - h
+                    found_break = False
+                    for break_start in sorted(self.BREAK_TIMES):
+                        break_abs_start = day_start + break_start
+                        if break_abs_start <= check_time:
+                            break_abs_start = day_start + 24 + break_start
+                        if break_abs_start < clean_end + total_break_time:
+                            total_break_time += self.BREAK_DURATION
+                            check_time = break_abs_start + self.BREAK_DURATION
+                            found_break = True
+                            break
+                    if not found_break:
+                        break
+                clean_end = t + oven_clean_time + total_break_time
+            
             last_oven2_clean_time = t
             oven2_free = clean_end
             if self.collect_gantt_data:
@@ -623,18 +667,39 @@ class ProductionSimulator:
         def form(product, oven_num, team_num):
             nonlocal batch_id, oven1_free, oven2_free, wb_batches_formed, bb_batches_formed, form_area_free
             
-            # Check if we have enough time before break
-            if self.BREAKS_ENABLED:
-                tub = time_until_break(time)
-                if tub < self.FORM_TIME:
-                    # Not enough time to form before break - return next break end
-                    return next_break_end(next_break_start(time))
-            
             b = Batch(batch_id, product)
             batch_id += 1
             
             b.form_start = time
-            b.form_end = time + self.FORM_TIME
+            
+            # Calculate form end time, accounting for any breaks during forming
+            form_end = time + self.FORM_TIME
+            if self.BREAKS_ENABLED:
+                # Check how many breaks occur between now and form_end
+                # and extend form_end by the break duration for each
+                check_time = time
+                total_break_time = 0
+                while check_time < form_end + total_break_time:
+                    # Find next break start after check_time
+                    h = check_time % 24
+                    day_start = check_time - h
+                    found_break = False
+                    for break_start in sorted(self.BREAK_TIMES):
+                        break_abs_start = day_start + break_start
+                        if break_abs_start <= check_time:
+                            # Try next day
+                            break_abs_start = day_start + 24 + break_start
+                        if break_abs_start < form_end + total_break_time:
+                            # This break falls within forming time
+                            total_break_time += self.BREAK_DURATION
+                            check_time = break_abs_start + self.BREAK_DURATION
+                            found_break = True
+                            break
+                    if not found_break:
+                        break
+                form_end = time + self.FORM_TIME + total_break_time
+            
+            b.form_end = form_end
             b.formed_by = team_num
             b.oven_set = oven_num  # Track which oven set is used
             
@@ -2031,6 +2096,20 @@ def gantt_image():
                     if shift_end >= start_hour and shift_end <= end_hour:
                         ax.axvline(x=shift_end, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
             
+            # Draw break times as orange vertical lines
+            if sim.BREAKS_ENABLED and hasattr(sim, 'BREAK_TIMES') and sim.BREAK_TIMES:
+                for day in range(int(start_hour // 24), int(end_hour // 24) + 2):
+                    for break_start in sim.BREAK_TIMES:
+                        break_abs_start = day * 24 + break_start
+                        break_abs_end = break_abs_start + sim.BREAK_DURATION
+                        
+                        if break_abs_start >= start_hour and break_abs_start <= end_hour:
+                            # Draw orange shaded region for break duration
+                            ax.axvspan(break_abs_start, min(break_abs_end, end_hour), 
+                                       color='orange', alpha=0.3, zorder=0)
+                            ax.axvline(x=break_abs_start, color='orange', linestyle='-', 
+                                       alpha=0.8, linewidth=2, zorder=5)
+            
             title = f'Production Flow - Week {week} (Hours {start_hour}-{end_hour})'
             title += f'\n{sim.TEAM_CONFIG}, {sim.config.get("num_ovens", 5)} ovens, Strategy: {sim.PRIORITY_STRATEGY}'
             ax.set_title(title, fontsize=12, fontweight='bold')
@@ -2048,6 +2127,8 @@ def gantt_image():
                 mpatches.Patch(facecolor='#FFB6C1', edgecolor='red', hatch='\\\\', label='Form Clean'),
                 mpatches.Patch(facecolor='#DDA0DD', edgecolor='purple', hatch='\\\\', label='Oven Clean'),
             ]
+            if sim.BREAKS_ENABLED and hasattr(sim, 'BREAK_TIMES') and sim.BREAK_TIMES:
+                legend_elements.append(mpatches.Patch(color='orange', alpha=0.5, label='Break'))
             ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
             
         else:  # workers chart
@@ -2186,6 +2267,20 @@ def gantt_image():
                     if shift_end >= start_hour and shift_end <= end_hour:
                         ax.axvline(x=shift_end, color='green', linestyle=':', alpha=0.7, linewidth=1.5)
             
+            # Draw break times as orange vertical lines
+            if sim.BREAKS_ENABLED and hasattr(sim, 'BREAK_TIMES') and sim.BREAK_TIMES:
+                for day in range(int(start_hour // 24), int(end_hour // 24) + 2):
+                    for break_start in sim.BREAK_TIMES:
+                        break_abs_start = day * 24 + break_start
+                        break_abs_end = break_abs_start + sim.BREAK_DURATION
+                        
+                        if break_abs_start >= start_hour and break_abs_start <= end_hour:
+                            # Draw orange shaded region for break duration
+                            ax.axvspan(break_abs_start, min(break_abs_end, end_hour), 
+                                       color='orange', alpha=0.3, zorder=0)
+                            ax.axvline(x=break_abs_start, color='orange', linestyle='-', 
+                                       alpha=0.8, linewidth=2, zorder=5)
+            
             title = f'Worker Activity - Week {week} (Hours {start_hour}-{end_hour})'
             title += f'\n{sim.TEAM_CONFIG}, Strategy: {sim.PRIORITY_STRATEGY}'
             ax.set_title(title, fontsize=12, fontweight='bold')
@@ -2199,6 +2294,8 @@ def gantt_image():
                 mpatches.Patch(facecolor='#FFB6C1', edgecolor='#DC143C', hatch='\\\\', label='Form Clean'),
                 mpatches.Patch(facecolor='#DDA0DD', edgecolor='#8B008B', hatch='\\\\', label='Oven Clean'),
             ]
+            if sim.BREAKS_ENABLED and hasattr(sim, 'BREAK_TIMES') and sim.BREAK_TIMES:
+                legend_elements.append(mpatches.Patch(color='orange', alpha=0.5, label='Break'))
             ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=2)
         
         plt.tight_layout()
