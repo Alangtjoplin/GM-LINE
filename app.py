@@ -1072,7 +1072,7 @@ class ProductionSimulator:
                 elif team2_free <= time:
                     if self.TEAM_CONFIG == '2team_24/7':
                         # Full capability mode - Team 2 can form, clean, and cut
-                        # Similar logic to Team 1 but uses oven 2 if available
+                        # But with only 1 oven set, Team 2 focuses on cutting to avoid resource contention
                         
                         # Check if on break first
                         if self.BREAKS_ENABLED and is_on_break(time):
@@ -1086,6 +1086,26 @@ class ProductionSimulator:
                             remaining = self.CUT_TIME - b.cut_progress
                             actual_work = cut(b, remaining, 2, is_partial=False)
                             team2_free = time + actual_work
+                        # With only 1 oven set, Team 2 should focus on cutting, not forming
+                        # This avoids resource contention with Team 1
+                        elif self.NUM_OVEN_SETS == 1:
+                            # Team 2 only cuts when there's 1 oven set
+                            ready = ready_to_cut(being_cut, 2)
+                            if ready:
+                                b = ready[0]
+                                being_cut.add(b.id)
+                                if b.cut_by is None:
+                                    b.cut_by = 2
+                                remaining = self.CUT_TIME - b.cut_progress
+                                actual_work = cut(b, remaining, 2, is_partial=False)
+                                team2_free = time + actual_work
+                            else:
+                                # Nothing to cut - wait for next batch to be ready
+                                next_events = [self.TOTAL_HOURS]
+                                for b in batches:
+                                    if b.cure_end > time and b.cut_end is None:
+                                        next_events.append(b.cure_end)
+                                team2_free = min(e for e in next_events if e > time)
                         # PRIORITY 1: Form cleaning if needed and form area is free
                         elif form_clean_needed and form_area_free <= time:
                             team2_free = do_form_clean(2, time)
@@ -1291,6 +1311,7 @@ class ProductionSimulator:
             'bb_pct': bb_pct,
             'wb_batches': wb_batches_formed,
             'bb_batches': bb_batches_formed,
+            'total_batches': wb_batches_formed + bb_batches_formed,
             'expired_batches': len(expired_batches)
         }
 
